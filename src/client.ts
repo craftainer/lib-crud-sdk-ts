@@ -530,7 +530,8 @@ export class CrudClient {
   }
 
   async #token(refresh: boolean): Promise<string | null> {
-    return (await this.#tokenProvider?.({ refresh })) ?? null;
+    // An empty token sends no header, so it is anonymous for the scope too.
+    return (await this.#tokenProvider?.({ refresh })) || null;
   }
 
   /** The current bearer token, or `null` when anonymous. */

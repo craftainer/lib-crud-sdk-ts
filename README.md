@@ -119,7 +119,41 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
 `revisionsOptions`/`manifestOptions`, `infiniteListOptions`, the
 `create`/`update`/`deleteMutationOptions` and `bridgeEvents(queryClient, hub,
 resource)`. Use `tanstackCachePolicy` so the SDK cache only revalidates and
-TanStack's `staleTime` owns freshness. See
+TanStack's `staleTime` owns freshness. The factories take structural slices (`list(query, { signal })`, ...), which
+the client's options-object methods do not match for `list`, `stats`,
+`predict` and the manifest. `tanstackApi(client, resource)` (from
+`./tanstack`) binds one `ResourceClient` to all of them; a query is the
+client's `ListOptions` (`{ filters, sort, skip, limit, ... }`) without
+`signal`, which TanStack's `signal` fills in.
+
+```ts
+import { createClient } from "@craftainer/crud-sdk";
+import {
+  createCache,
+  MemoryStore,
+  cachePolicyFromManifest,
+} from "@craftainer/crud-sdk/cache";
+import { listOptions, tanstackApi } from "@craftainer/crud-sdk/tanstack";
+
+const cache = createCache({
+  store: new MemoryStore(),
+  policies: { heroes: cachePolicyFromManifest(heroesManifestEntry) },
+});
+const client = createClient({
+  baseUrl,
+  middleware: [cache.middleware, cache.autoIfMatch],
+});
+const api = tanstackApi(client, await client.resource("heroes"));
+useQuery(listOptions("heroes", api, { limit: 50 }));
+```
+
+The cache scope is the same on both sides: `client.scope()` equals
+`credentialScope` of the `Authorization` header the client sends (an empty
+token sends no header and is `anon`). `cache.autoIfMatch` reads `recordId`,
+the resource and `apiVersion` from the client's request context, so
+`update`/`delete` without `ifMatch` send the ETag cached for that caller.
+
+See
 [`docs/adrs/0002-cache-freshness-and-event-invalidation.md`](docs/adrs/0002-cache-freshness-and-event-invalidation.md).
 
 ## Development

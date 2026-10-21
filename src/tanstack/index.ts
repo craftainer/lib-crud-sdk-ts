@@ -7,6 +7,8 @@
 import type { DataTag, InfiniteData, QueryClient } from "@tanstack/query-core";
 import type { EventHub } from "../events.ts";
 
+export { tanstackApi } from "./adapter.ts";
+export type { TanstackApi } from "./adapter.ts";
 export { tanstackCachePolicy } from "../cache/policy.ts";
 export type { CachePolicy, ManifestCacheHints } from "../cache/policy.ts";
 export { getEventHub, subscribeEvents } from "../events.ts";
