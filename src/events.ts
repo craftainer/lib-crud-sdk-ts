@@ -253,13 +253,12 @@ class Hub {
     }
     const record = data as Record<string, unknown>;
     if ("subscriber_id" in record) {
-      const reconnect = this.connections > 0;
       this.connections += 1;
       this.subscriberId = String(record["subscriber_id"]);
       this.attempt = 0;
-      if (reconnect) {
-        await this.fan((handlers) => handlers.onReset?.());
-      }
+      // Every connect, the first included: entries stored before this stream
+      // (an earlier page session, a persisted store) may predate server changes.
+      await this.fan((handlers) => handlers.onReset?.());
       await this.setConnected(true);
       return;
     }

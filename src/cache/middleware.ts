@@ -197,8 +197,9 @@ export function createCache(options: CacheOptions): Cache {
   const tasks = new Set<Promise<void>>();
   const background = new AbortController();
 
+  let globalGeneration = 0; // bumped by `clear`, which may span resources
   const generation = (resource: string | undefined): number =>
-    generations.get(resource ?? "") ?? 0;
+    (generations.get(resource ?? "") ?? 0) + globalGeneration;
   const bump = (resource: string): void => {
     generations.set(resource, generation(resource) + 1);
   };
@@ -687,6 +688,7 @@ export function createCache(options: CacheOptions): Cache {
       await clearPrefixes(resourcePrefixes(resource));
     },
     async clear(prefix) {
+      globalGeneration += 1; // reads in flight must not store fresh over the clear
       await safe(() => store.clear(prefix));
     },
     cachedEtag: lookupEtag,

@@ -147,6 +147,9 @@ const api = tanstackApi(client, await client.resource("heroes"));
 useQuery(listOptions("heroes", api, { limit: 50 }));
 ```
 
+Cache keys carry no server origin: give each server its own store (or
+IndexedDB `name`).
+
 The cache scope is the same on both sides: `client.scope()` equals
 `credentialScope` of the `Authorization` header the client sends (an empty
 token sends no header and is `anon`). `cache.autoIfMatch` reads `recordId`,

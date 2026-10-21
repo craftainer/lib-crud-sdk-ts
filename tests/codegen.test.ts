@@ -64,6 +64,33 @@ describe("generateTypes", () => {
   });
 });
 
+describe("title stripping", () => {
+  it("keeps values under default, const, enum and examples whole", async () => {
+    const raw = structuredClone(fixture("admin.manifest.json")) as {
+      resources: Array<{
+        schemas: { read: { properties: Record<string, object> } };
+      }>;
+    };
+    const first = raw.resources[0]!.schemas.read.properties;
+    first["extra"] = {
+      title: "Extra",
+      type: "object",
+      default: { title: "Untitled" },
+      examples: [{ title: "x" }],
+    };
+    const seen: string[] = [];
+    const compile: Compile = (schema, name) => {
+      seen.push(JSON.stringify(schema));
+      return Promise.resolve(`export interface ${name} {}\n`);
+    };
+    await generateTypes(parseManifest(raw), "m", compile);
+    const read = seen.find((text) => text.includes("Untitled")) as string;
+    expect(read).toContain('"default":{"title":"Untitled"}');
+    expect(read).toContain('"examples":[{"title":"x"}]');
+    expect(read).not.toContain('"title":"Extra"');
+  });
+});
+
 describe("loadCompiler", () => {
   it("explains a missing peer dependency", async () => {
     vi.resetModules();

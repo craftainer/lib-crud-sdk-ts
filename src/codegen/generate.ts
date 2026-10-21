@@ -29,6 +29,13 @@ const OPTIONS = {
   declareExternallyReferenced: false,
 };
 
+const DATA_KEYWORDS: ReadonlySet<string> = new Set([
+  "default",
+  "const",
+  "enum",
+  "examples",
+]);
+
 /**
  * Drops `title` annotations below the root: the compiler turns each into a
  * named type alias, which would collide across resources (and `Name` says
@@ -44,7 +51,10 @@ function withoutTitles(node: unknown, isPropertyMap = false): unknown {
   const out: JsonObject = {};
   for (const [key, value] of Object.entries(node)) {
     if (isPropertyMap || key !== "title" || typeof value !== "string") {
-      out[key] = withoutTitles(value, !isPropertyMap && key === "properties");
+      // Data keywords hold values, not schemas: leave them whole.
+      out[key] = DATA_KEYWORDS.has(key)
+        ? value
+        : withoutTitles(value, !isPropertyMap && key === "properties");
     }
   }
   return out;

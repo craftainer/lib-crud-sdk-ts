@@ -73,3 +73,21 @@ describe("invalidateOnEvents", () => {
     expect(cache.eventsActive("heroes")).toBe(false);
   });
 });
+
+describe("invalidateOnEvents with several subscribers", () => {
+  it("closes the freshness gate only when the last one leaves", () => {
+    const cache = createCache({
+      store: new MemoryStore(),
+      policies: { heroes: cachePolicyFromManifest({}) },
+    });
+    const a = manualHub();
+    const b = manualHub();
+    const stopA = invalidateOnEvents(cache, a.hub, "heroes");
+    const stopB = invalidateOnEvents(cache, b.hub, "heroes");
+    cache.setEventsActive("heroes", true);
+    stopA();
+    expect(cache.eventsActive("heroes")).toBe(true);
+    stopB();
+    expect(cache.eventsActive("heroes")).toBe(false);
+  });
+});

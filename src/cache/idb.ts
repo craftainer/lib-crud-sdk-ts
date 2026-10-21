@@ -3,7 +3,7 @@
  *
  * Every call is wrapped: a blocked database, private mode or a missing
  * `indexedDB` is a miss (or a no-op), never a failed request. `clear(prefix)`
- * is one `IDBKeyRange.bound(prefix, prefix + "￿")` delete.
+ * is one `IDBKeyRange.bound(prefix, prefix + "\uffff")` delete.
  */
 import { openDB } from "idb";
 import type { IDBPDatabase } from "idb";
@@ -96,7 +96,7 @@ export class IndexedDbStore implements CacheStore {
     return this.run(undefined, (db) =>
       prefix === undefined
         ? db.clear(STORE)
-        : db.delete(STORE, IDBKeyRange.bound(prefix, `${prefix}￿`)),
+        : db.delete(STORE, IDBKeyRange.bound(prefix, `${prefix}\uffff`)),
     );
   }
 

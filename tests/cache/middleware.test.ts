@@ -639,6 +639,20 @@ describe("races", () => {
     expect(cacheStatus(await s.call(ctxFor("list")))).toBe("revalidated");
   });
 
+  it("does not store fresh a response that was in flight when cache.clear ran", async () => {
+    const s = setup({ max_age: 60 });
+    s.cache.setEventsActive("heroes", true);
+    const gate = deferred<Response>();
+    s.net.push(() => gate.promise, notModified());
+    const pending = s.call(ctxFor("list"));
+    await vi.waitFor(() => expect(s.net.sent).toHaveLength(1));
+    await s.cache.clear("v1/heroes/");
+    gate.resolve(list());
+    await pending;
+    const stored = s.store.get(LIST) as CacheEntry;
+    expect(stored.freshUntil).toBe(stored.storedAt);
+  });
+
   it("applies to a write-through too, and to a write that landed meanwhile", async () => {
     const s = setup({ max_age: 60 });
     s.cache.setEventsActive("heroes", true);

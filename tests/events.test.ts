@@ -126,6 +126,7 @@ describe("subscribeEvents", () => {
     );
     await vi.waitFor(() =>
       expect(c.log).toEqual([
+        "reset",
         "status:true",
         "event:create:5",
         "event:delete:7",
@@ -159,7 +160,13 @@ describe("subscribeEvents", () => {
     conn.push(frame(2, record("explode", 1)));
     conn.push(frame(3, record("update", 1, { record_id: 1.5 })));
     await vi.waitFor(() =>
-      expect(c.log).toEqual(["status:true", "reset", "reset", "reset"]),
+      expect(c.log).toEqual([
+        "reset",
+        "status:true",
+        "reset",
+        "reset",
+        "reset",
+      ]),
     );
     stop();
   });
@@ -199,7 +206,7 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
     net.conns[0]!.end(); // the server closes the stream
     await vi.advanceTimersByTimeAsync(0);
-    expect(c.log).toEqual(["status:true", "status:false"]);
+    expect(c.log).toEqual(["reset", "status:true", "status:false"]);
     await vi.advanceTimersByTimeAsync(999);
     expect(net.conns).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
@@ -208,6 +215,7 @@ describe("subscribeEvents", () => {
     net.conns[1]!.push(handshake("def"));
     await vi.advanceTimersByTimeAsync(0);
     expect(c.log).toEqual([
+      "reset",
       "status:true",
       "status:false",
       "reset",
@@ -302,9 +310,9 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(29_000);
     net.conns[0]!.push(": keep-alive\n\n"); // bytes arrive: the timer restarts
     await vi.advanceTimersByTimeAsync(29_999);
-    expect(c.log).toEqual(["status:true"]);
+    expect(c.log).toEqual(["reset", "status:true"]);
     await vi.advanceTimersByTimeAsync(1);
-    expect(c.log).toEqual(["status:true", "status:false"]);
+    expect(c.log).toEqual(["reset", "status:true", "status:false"]);
     expect(net.conns[0]!.signal?.aborted).toBe(true);
     await vi.advanceTimersByTimeAsync(1000);
     expect(net.conns).toHaveLength(2);
@@ -325,9 +333,9 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
     net.conns[0]!.push(handshake("abc"));
     await vi.advanceTimersByTimeAsync(44_999);
-    expect(c.log).toEqual(["status:true"]);
+    expect(c.log).toEqual(["reset", "status:true"]);
     await vi.advanceTimersByTimeAsync(1);
-    expect(c.log).toEqual(["status:true", "status:false"]);
+    expect(c.log).toEqual(["reset", "status:true", "status:false"]);
     stop();
     await vi.advanceTimersByTimeAsync(0);
   });
@@ -363,7 +371,7 @@ describe("subscribeEvents", () => {
     });
     await vi.waitFor(() => expect(net.conns).toHaveLength(1));
     net.conns[0]!.push(handshake("abc"));
-    await vi.waitFor(() => expect(a.log).toEqual(["status:true"]));
+    await vi.waitFor(() => expect(a.log).toEqual(["reset", "status:true"]));
     const stopB = subscribeEvents({
       fetch: net.fn,
       url: URL_,
@@ -407,7 +415,7 @@ describe("subscribeEvents", () => {
     });
     await vi.waitFor(() => expect(net.conns).toHaveLength(1));
     net.conns[0]!.push(handshake("one"));
-    await vi.waitFor(() => expect(first.log).toEqual(["status:true"]));
+    await vi.waitFor(() => expect(first.log).toEqual(["reset", "status:true"]));
     // Leave and join in the same tick: the old reader is still stopping.
     stopFirst();
     const second = collect();
@@ -423,11 +431,11 @@ describe("subscribeEvents", () => {
     net.conns[1]!.push(handshake("two"));
     net.conns[1]!.push(frame(1, record("create", 9)));
     await vi.waitFor(() =>
-      expect(second.log).toEqual(["status:true", "event:create:9"]),
+      expect(second.log).toEqual(["reset", "status:true", "event:create:9"]),
     );
     // The old reader's exit did not clear the new one's state.
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(second.log).toEqual(["status:true", "event:create:9"]);
+    expect(second.log).toEqual(["reset", "status:true", "event:create:9"]);
     expect(net.conns[1]!.signal?.aborted).toBe(false);
     stopSecond();
   });
@@ -443,7 +451,7 @@ describe("subscribeEvents", () => {
     });
     await vi.waitFor(() => expect(net.conns).toHaveLength(1));
     net.conns[0]!.push(handshake("abc"));
-    await vi.waitFor(() => expect(a.log).toEqual(["status:true"]));
+    await vi.waitFor(() => expect(a.log).toEqual(["reset", "status:true"]));
     const b = collect();
     const stopB = subscribeEvents({
       fetch: net.fn,

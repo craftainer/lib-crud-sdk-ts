@@ -1,7 +1,5 @@
 import { cacheScope } from "../auth.ts";
 
-/** The cache scope of a request: derived from the Authorization header it is sent with. */
-
 /**
  * `"anon"` when the request has no Authorization header; otherwise the first
  * 32 hex characters of the SHA-256 of the whole credential, the same digest as

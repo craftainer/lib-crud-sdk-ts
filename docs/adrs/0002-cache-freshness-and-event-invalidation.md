@@ -30,7 +30,7 @@ We will:
   resource's SSE stream is connected, never when the manifest says
   `cache.revalidate_only`. `stats`/`predict` are bounded by `stats_ttl`.
 - Treat events as invalidations only, never as data (no snapshot is applied),
-  clearing the spec's prefixes in one `clearMany` pass; a reconnect clears the
+  clearing the spec's prefixes in one `clearMany` pass; every connect (the first included, since a persisted store may predate it) clears the
   resource. A per-resource generation counter stops responses that predate an
   invalidation from being stored fresh.
 - Derive the cache scope from the `Authorization` header on the request the

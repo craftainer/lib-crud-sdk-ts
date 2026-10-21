@@ -239,7 +239,12 @@ export function manifestOptions<M>(
 export interface InfiniteListInit extends QueryOptionsInit {
   /** Page size; default 100 (the server's default). */
   readonly limit?: number;
-  /** Query keys for the paging parameters: the manifest's `skip_param`/`limit_param`. Default `skip`/`limit`. */
+  /**
+   * Keys of the paging parameters in the query object handed to `api.list`.
+   * Default `skip`/`limit`, which is what `tanstackApi` (the client's
+   * `ListOptions`) reads; change them only for a hand-written `ListApi`. The
+   * client maps them to the manifest's `skip_param`/`limit_param` itself.
+   */
   readonly skipKey?: string;
   readonly limitKey?: string;
 }
