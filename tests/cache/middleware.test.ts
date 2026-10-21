@@ -1240,3 +1240,90 @@ describe("close", () => {
     expect(s.net.sent).toHaveLength(1); // but nothing was scheduled
   });
 });
+
+describe("spec amendments of 2026-10-21", () => {
+  it("never serves filters fresh, even with the stream up", async () => {
+    const s = setup({ max_age: 60 });
+    s.cache.setEventsActive("heroes", true);
+    s.net.push(list([{ field: "x" }]), notModified());
+    await s.call(ctxFor("filters"));
+    const key = "v1/heroes/filters/_/_/anon/";
+    const stored = s.store.get(key) as CacheEntry;
+    expect(stored.freshUntil).toBe(stored.storedAt);
+    expect(cacheStatus(await s.call(ctxFor("filters")))).toBe("revalidated");
+    expect(s.net.sent).toHaveLength(2);
+  });
+
+  it("builds a policy per name and api version, falling back to the name", async () => {
+    const clock = { t: 1_000_000 };
+    const cache = createCache({
+      store: new MemoryStore({ now: () => clock.t }),
+      policies: {
+        "heroes@v2": policy({ max_age: 60 }),
+        heroes: policy({ max_age: 0 }),
+        "ships@v1": policy({ max_age: 60 }),
+      },
+      now: () => clock.t,
+    });
+    cache.setEventsActive("heroes", true); // one gate per name, shared by versions
+    const net = fakeNet();
+    const call = (version: string | null) =>
+      cache.middleware(ctxFor("list", { apiVersion: version }), net.next);
+    net.push(list([1]), list([1]), notModified());
+    await call("v2");
+    expect(cacheStatus(await call("v2"))).toBe("hit"); // heroes@v2: max_age 60
+    await call("v1"); // heroes: no fresh window
+    expect(cacheStatus(await call("v1"))).toBe("revalidated");
+    // A resource that only has a versioned policy is not cached at other versions.
+    net.push(list([2]));
+    await cache.middleware(
+      ctxFor("list", { resource: "ships", apiVersion: "v9" }),
+      net.next,
+    );
+    expect(net.sent.at(-1)?.headers.has("if-none-match")).toBe(false);
+    await cache.close();
+  });
+
+  it("plans a background refresh with the generation the read was planned with", async () => {
+    const clock = { t: 1_000_000 };
+    const inner = new MemoryStore({ now: () => clock.t });
+    const hold = deferred<void>();
+    const waiting = deferred<void>();
+    let slow = false;
+    const store: CacheStore = {
+      get: async (key) => {
+        if (slow) {
+          waiting.resolve();
+          await hold.promise;
+        }
+        return inner.get(key);
+      },
+      set: (key, entry, ttl) => inner.set(key, entry, ttl),
+      delete: (key) => inner.delete(key),
+      clear: (prefix) => inner.clear(prefix),
+    };
+    const cache = createCache({
+      store,
+      policies: { heroes: policy({ max_age: 10, stale_while_revalidate: 30 }) },
+      now: () => clock.t,
+    });
+    cache.setEventsActive("heroes", true);
+    const net = fakeNet();
+    const call = () => cache.middleware(ctxFor("list"), net.next);
+    net.push(list([1]));
+    await call();
+    clock.t += 10_000; // stale now
+    slow = true;
+    net.push(list([2], ETAG2));
+    const read = call(); // planned (generation read) before the invalidation
+    await waiting.promise; // planned: the store read is pending
+    await cache.clear("v1/other/"); // bumps the generation, keeps this entry
+    hold.resolve();
+    expect(cacheStatus(await read)).toBe("stale");
+    await vi.waitFor(() => expect(net.sent).toHaveLength(2));
+    await cache.close();
+    const stored = inner.get(LIST) as CacheEntry;
+    expect(stored.body).toBe("[2]");
+    expect(stored.freshUntil).toBe(stored.storedAt); // not stored fresh
+  });
+});

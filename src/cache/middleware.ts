@@ -60,7 +60,11 @@ export interface CacheStoreMany extends CacheStore {
 
 export interface CacheOptions {
   readonly store: CacheStoreMany;
-  /** Policy per manifest resource name; a resource without one is not cached. */
+  /**
+   * Policy per manifest resource: `name@apiVersion` (built from that version's
+   * manifest entry) or, for every version, plain `name`. A resource without
+   * one is not cached. The event stream and the freshness gate are per name.
+   */
   readonly policies: Readonly<Record<string, CachePolicy>>;
   /** Cache the manifest document per caller scope. Default `true`. */
   readonly cacheManifest?: boolean;
@@ -189,6 +193,13 @@ async function safe<T>(call: () => T | Promise<T>): Promise<T | undefined> {
 export function createCache(options: CacheOptions): Cache {
   const { store } = options;
   const policies = new Map(Object.entries(options.policies));
+  const policyFor = (
+    resource: string | undefined,
+    apiVersion: string | null,
+  ): CachePolicy | undefined =>
+    resource === undefined
+      ? undefined
+      : (policies.get(`${resource}@${apiVersion}`) ?? policies.get(resource));
   const cacheManifest = options.cacheManifest ?? true;
   const now = options.now ?? Date.now;
   const eventsActive = new Set<string>();
@@ -214,6 +225,7 @@ export function createCache(options: CacheOptions): Cache {
   ): boolean =>
     !policy.revalidateOnly &&
     kind !== "manifest" &&
+    kind !== "filters" && // events never clear them, so they are never fresh
     (isStatsKind(kind) || eventsActive.has(resource as string));
 
   /** Milliseconds fresh and of stale-while-revalidate for a new entry; none if the response may predate an invalidation. */
@@ -265,8 +277,7 @@ export function createCache(options: CacheOptions): Cache {
     const scope = await credentialScope(request.headers);
     const generationNow = generation(resource);
     if (request.method !== "GET") {
-      const policy =
-        resource === undefined ? undefined : policies.get(resource);
+      const policy = policyFor(resource, ctx.apiVersion);
       return policy?.enabled === true
         ? {
             ctx,
@@ -290,7 +301,7 @@ export function createCache(options: CacheOptions): Cache {
       kind = "manifest";
       key = manifestKey(scope);
     } else {
-      policy = resource === undefined ? undefined : policies.get(resource);
+      policy = policyFor(resource, ctx.apiVersion);
       if (
         resource === undefined ||
         policy?.enabled !== true ||
@@ -368,7 +379,7 @@ export function createCache(options: CacheOptions): Cache {
       return [];
     }
     const names = new Set([
-      ...policies.keys(),
+      ...[...policies.keys()].map((key) => key.replace(/@[^@]*$/, "")),
       ...manifestResources(old.body),
       ...manifestResources(entry.body),
     ]);
@@ -585,7 +596,6 @@ export function createCache(options: CacheOptions): Cache {
         const fresh: State = {
           ...state,
           validated: entry.etag !== undefined,
-          generation: generation(state.ctx.resource), // as of this request
         };
         const response = await next({ ...state.ctx, request, signal });
         const result = await finish(fresh, response);
@@ -636,7 +646,7 @@ export function createCache(options: CacheOptions): Cache {
       (ctx.op === "update" || ctx.op === "delete") &&
       recordId !== undefined &&
       resource !== undefined &&
-      policies.get(resource)?.enabled === true &&
+      policyFor(resource, ctx.apiVersion)?.enabled === true &&
       !request.headers.has("if-match")
     ) {
       const etag = await lookupEtag(

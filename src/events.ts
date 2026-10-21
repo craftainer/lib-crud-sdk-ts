@@ -33,7 +33,7 @@ export interface EventsConfig {
  */
 export interface EventHandlers {
   onEvent(event: CrudEvent): MaybePromise<void>;
-  /** After a reconnect, and for an event with no usable record id: clear the resource. */
+  /** After every connect (the first included), and for an event with no usable record id: clear the resource. */
   onReset?(): MaybePromise<void>;
   /** `true` when the stream is connected, `false` on any loss, exit or unsubscribe. */
   onStatus?(connected: boolean): MaybePromise<void>;
@@ -95,7 +95,6 @@ class Hub {
   private controller: AbortController | undefined;
   private connected = false;
   private subscriberId: string | undefined;
-  private connections = 0;
   private attempt = 0;
 
   constructor(options: EventHubOptions, onEmpty: () => void) {
@@ -253,7 +252,6 @@ class Hub {
     }
     const record = data as Record<string, unknown>;
     if ("subscriber_id" in record) {
-      this.connections += 1;
       this.subscriberId = String(record["subscriber_id"]);
       this.attempt = 0;
       // Every connect, the first included: entries stored before this stream

@@ -147,8 +147,16 @@ const api = tanstackApi(client, await client.resource("heroes"));
 useQuery(listOptions("heroes", api, { limit: 50 }));
 ```
 
-Cache keys carry no server origin: give each server its own store (or
-IndexedDB `name`).
+Cache keys carry no server origin, so a store shared between servers needs a
+per-origin namespace: give each server its own `MemoryStore` or its own
+`IndexedDbStore({ name })` (the IndexedDB database name). The key format does
+not change.
+
+`policies` is keyed by `name@apiVersion` (built from that version's manifest
+entry) or by plain `name` for every version; the event stream and the
+freshness gate are per resource name, and the gate stays open while at least
+one subscription for that resource is connected. `filters` entries are never
+served fresh.
 
 The cache scope is the same on both sides: `client.scope()` equals
 `credentialScope` of the `Authorization` header the client sends (an empty

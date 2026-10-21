@@ -501,7 +501,7 @@ export class CrudClient {
   readonly #tokenProvider: TokenProvider | undefined;
   readonly #middleware: Middleware[];
   readonly #manifestUrl: string | undefined;
-  #manifest: Promise<Manifest> | undefined;
+  readonly #manifests = new Map<string, Promise<Manifest>>();
   readonly #transport: Transport;
 
   constructor(options: ClientOptions) {
@@ -633,22 +633,27 @@ export class CrudClient {
     }
   }
 
-  /** The manifest for this caller, loaded once (`refresh: true` reloads). */
-  manifest(options: { readonly refresh?: boolean } = {}): Promise<Manifest> {
-    if (this.#manifest === undefined || options.refresh === true) {
-      const loading = loadManifest(
+  /** The manifest for this caller, loaded once per caller scope (`refresh: true` reloads). */
+  async manifest(
+    options: { readonly refresh?: boolean } = {},
+  ): Promise<Manifest> {
+    const scope = await this.scope(); // the manifest is filtered per caller
+    let loading = this.#manifests.get(scope);
+    if (loading === undefined || options.refresh === true) {
+      const started = loadManifest(
         (url, catalog) => this.#getJson(url, catalog),
         this.baseUrl,
         this.#manifestUrl,
       );
-      this.#manifest = loading;
-      loading.catch(() => {
-        if (this.#manifest === loading) {
-          this.#manifest = undefined;
+      loading = started;
+      this.#manifests.set(scope, started);
+      started.catch(() => {
+        if (this.#manifests.get(scope) === started) {
+          this.#manifests.delete(scope);
         }
       });
     }
-    return this.#manifest;
+    return loading;
   }
 
   /** A handle for `name` (the highest `api_version` unless given). */

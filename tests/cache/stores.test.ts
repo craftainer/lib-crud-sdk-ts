@@ -160,6 +160,15 @@ describe("IndexedDbStore", () => {
     await store.close();
   });
 
+  it("closes the handle of a failed operation and reopens on the next call", async () => {
+    const store = new IndexedDbStore({ name: "t-failed-op" });
+    await store.set("ok", entry("a"));
+    const bad = { ...entry("b"), headers: (() => 1) as never }; // not cloneable
+    await expect(store.set("bad", bad)).resolves.toBeUndefined();
+    expect((await store.get("ok"))?.body).toBe("a");
+    await store.close();
+  });
+
   it("counts a failing database as a miss and retries later", async () => {
     const open = vi.spyOn(fakeIdb, "open").mockImplementation(() => {
       throw new Error("blocked");

@@ -59,7 +59,14 @@ export class IndexedDbStore implements CacheStore {
     try {
       return await work(await this.open());
     } catch {
+      // Close the handle we drop: an orphaned connection can block an upgrade.
+      const dropped = this.opening;
       this.opening = undefined;
+      try {
+        (await dropped)?.close();
+      } catch {
+        // It never opened.
+      }
       return fallback;
     }
   }

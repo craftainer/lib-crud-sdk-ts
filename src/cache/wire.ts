@@ -37,7 +37,10 @@ export function invalidateOnEvents(
     onStatus: mark,
   });
   return () => {
-    unsubscribe();
-    mark(false); // idempotent: the last one out closes the gate
+    try {
+      unsubscribe();
+    } finally {
+      mark(false); // idempotent; the gate stays open while another subscription is connected
+    }
   };
 }

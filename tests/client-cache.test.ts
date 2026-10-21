@@ -174,3 +174,18 @@ describe("tanstackApi", () => {
     expect(seen.at(-1)?.request.signal.aborted).toBe(true);
   });
 });
+
+describe("manifest per caller", () => {
+  it("loads again when the caller (token) changes", async () => {
+    const tokens = { current: "token-a" as string | null };
+    const { client, seen } = setup(tokens);
+    const loads = (): number =>
+      seen.filter((entry) => entry.url === `${BASE}/m`).length;
+    await client.manifest();
+    await client.manifest();
+    expect(loads()).toBe(1);
+    tokens.current = "token-b";
+    await client.manifest();
+    expect(loads()).toBe(2);
+  });
+});
