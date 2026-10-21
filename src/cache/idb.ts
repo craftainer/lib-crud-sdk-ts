@@ -38,6 +38,10 @@ export class IndexedDbStore implements CacheStore {
 
   constructor(options: IndexedDbStoreOptions = {}) {
     this.name = options.name ?? "craftainer-crud-cache";
+    if (this.name === "") {
+      // The name is the per-origin namespace of the store.
+      throw new RangeError("IndexedDbStore: name must not be empty");
+    }
     this.defaultTtlMs = options.defaultTtlMs ?? DEFAULT_TTL_MS;
     this.now = options.now ?? Date.now;
   }

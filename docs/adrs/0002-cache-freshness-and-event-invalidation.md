@@ -66,3 +66,9 @@ We will:
 - Keys carry no origin. A store shared between servers needs a per-origin
   namespace (the IndexedDB database name; a separate `MemoryStore`). The key
   format is unchanged.
+- Stale-while-revalidate is granted only while the resource's stream is up,
+  for every kind (`stats`/`predict` included; their `stats_ttl` fresh window is
+  unchanged). The first handshake of a hub clears the resource like a
+  reconnect, since a persisted store may hold older entries.
+- Only `POST`, `PATCH`, `PUT` and `DELETE` clear; an empty IndexedDB database
+  name is rejected; a malformed 2xx JSON body is a `ResponseError`.

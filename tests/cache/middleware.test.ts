@@ -1327,3 +1327,34 @@ describe("spec amendments of 2026-10-21", () => {
     expect(stored.freshUntil).toBe(stored.storedAt); // not stored fresh
   });
 });
+
+describe("spec amendments (final review)", () => {
+  it("grants stale-while-revalidate only with the stream up, stats and predict included", async () => {
+    const s = setup({ stats_ttl: 10, stale_while_revalidate: 30 });
+    const stats = () => ctxFor("stats");
+    s.net.push(list([1]), list([2], ETAG2), list([3], 'W/"3"'));
+    await s.call(stats()); // no stream
+    const key = "v1/heroes/stats/_/_/anon/";
+    const stored = s.store.get(key) as CacheEntry;
+    expect(stored.freshUntil - stored.storedAt).toBe(10_000); // stats_ttl as before
+    expect(stored.staleUntil).toBe(stored.freshUntil); // but no stale window
+    s.clock.t += 10_000;
+    expect(cacheStatus(await s.call(stats()))).toBe("miss"); // not served stale
+    s.cache.setEventsActive("heroes", true);
+    s.clock.t += 20_000;
+    await s.call(stats());
+    const withStream = s.store.get(key) as CacheEntry;
+    expect(withStream.staleUntil - withStream.freshUntil).toBe(30_000);
+  });
+
+  it("only write methods clear: HEAD and OPTIONS do not", async () => {
+    const s = setup();
+    s.net.push(list([1]), new Response(null, { status: 200 }));
+    await s.call(ctxFor("list"));
+    for (const method of ["HEAD", "OPTIONS"]) {
+      s.net.push(new Response(null, { status: 200 }));
+      await s.call(ctxFor("update", { method, recordId: 5, query: "?id=5" }));
+    }
+    expect(s.store.get(LIST)).toBeDefined();
+  });
+});

@@ -26,6 +26,9 @@ export class ManifestError extends ClientError {}
 /** The manifest lists no such resource for this caller. */
 export class UnknownResourceError extends ClientError {}
 
+/** A successful response whose body is not the JSON the client expects; `cause` holds the parse error. */
+export class ResponseError extends CrudError {}
+
 /** The request never produced a response; `cause` holds the transport error. */
 export class ConnectionFailed extends CrudError {}
 

@@ -5,6 +5,7 @@ import {
   ConnectionFailed,
   InvalidQueryError,
   ManifestError,
+  ResponseError,
   UnknownResourceError,
   problemFromResponse,
 } from "./errors.ts";
@@ -513,9 +514,17 @@ export class CrudClient {
     this.#transport = {
       json: async (call, signal) => {
         const response = await this.#send(call, signal);
-        return response.status === 204
-          ? undefined
-          : ((await response.json()) as unknown);
+        if (response.status === 204) {
+          return undefined;
+        }
+        try {
+          return (await response.json()) as unknown;
+        } catch (error) {
+          throw new ResponseError(
+            `${call.method} ${call.url}: the ${response.status} response body is not valid JSON`,
+            { cause: error },
+          );
+        }
       },
       none: async (call, signal) => {
         await (await this.#send(call, signal)).body?.cancel();

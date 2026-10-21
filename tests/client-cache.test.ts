@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cacheScope, createClient } from "../src/index.ts";
+import { ResponseError, cacheScope, createClient } from "../src/index.ts";
 import type { Middleware } from "../src/index.ts";
 import {
   MemoryStore,
@@ -190,5 +190,27 @@ describe("manifest per caller", () => {
     tokens.current = "token-a"; // only the latest caller's manifest is kept
     await client.manifest();
     expect(loads()).toBe(3);
+  });
+});
+
+describe("malformed success bodies", () => {
+  it("becomes ResponseError, not a SyntaxError", async () => {
+    const { fetch } = fakeFetch((request: Seen) =>
+      request.url === `${BASE}/m`
+        ? json(manifest)
+        : new Response("not json", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+    });
+    const heroes = await client.resource("heroes");
+    const error = await heroes.get(7).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ResponseError);
+    expect((error as Error).cause).toBeInstanceOf(SyntaxError);
   });
 });

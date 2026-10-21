@@ -152,6 +152,10 @@ describe("IndexedDbStore", () => {
     await store.close();
   });
 
+  it("rejects an empty database name", () => {
+    expect(() => new IndexedDbStore({ name: "" })).toThrow(RangeError);
+  });
+
   it("defaults the name and the clock", async () => {
     const store = new IndexedDbStore();
     await store.set("k", entry("a"));

@@ -38,6 +38,7 @@ export {
   PreconditionFailed,
   ProblemError,
   RateLimited,
+  ResponseError,
   ServerError,
   Unauthorized,
   UnknownResourceError,

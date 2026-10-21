@@ -136,6 +136,12 @@ interface State {
 
 const MIN_RETENTION_MS = 3_600_000;
 const MANIFEST_POLICY: CachePolicy = cachePolicyFromManifest({});
+const WRITE_METHODS: ReadonlySet<string> = new Set([
+  "POST",
+  "PATCH",
+  "PUT",
+  "DELETE",
+]);
 const BULK_OPS: ReadonlySet<string> = new Set(["bulk_update", "bulk_delete"]);
 const RECORD_WRITES: ReadonlySet<string> = new Set([
   "delete",
@@ -217,7 +223,11 @@ export function createCache(options: CacheOptions): Cache {
 
   // -- freshness ---------------------------------------------------------------
 
-  /** Whether an entry of `kind` may be fresh (or stale-while-revalidate) right now. */
+  /**
+   * Whether an entry of `kind` may be served without the network right now:
+   * only while the stream is up, except `stats`/`predict`, which `stats_ttl`
+   * bounds on its own. Never `filters` (events never clear them) or the manifest.
+   */
   const gateOpen = (
     policy: CachePolicy,
     resource: string | undefined,
@@ -225,8 +235,16 @@ export function createCache(options: CacheOptions): Cache {
   ): boolean =>
     !policy.revalidateOnly &&
     kind !== "manifest" &&
-    kind !== "filters" && // events never clear them, so they are never fresh
+    kind !== "filters" &&
     (isStatsKind(kind) || eventsActive.has(resource as string));
+
+  /** Stale-while-revalidate needs the stream for every kind, stats and predict included. */
+  const staleOpen = (
+    policy: CachePolicy,
+    resource: string | undefined,
+    kind: Kind,
+  ): boolean =>
+    gateOpen(policy, resource, kind) && eventsActive.has(resource as string);
 
   /** Milliseconds fresh and of stale-while-revalidate for a new entry; none if the response may predate an invalidation. */
   const entryTimes = (
@@ -245,7 +263,9 @@ export function createCache(options: CacheOptions): Cache {
       : state.policy.maxAge;
     return {
       fresh: fresh * 1000,
-      stale: state.policy.staleWhileRevalidate * 1000,
+      stale: staleOpen(state.policy, resource, kind)
+        ? state.policy.staleWhileRevalidate * 1000
+        : 0,
     };
   };
 
@@ -261,7 +281,10 @@ export function createCache(options: CacheOptions): Cache {
       if (at < entry.freshUntil) {
         return "hit";
       }
-      if (at < entry.staleUntil) {
+      if (
+        at < entry.staleUntil &&
+        staleOpen(state.policy, state.ctx.resource, state.kind as Kind)
+      ) {
         return "stale";
       }
     }
@@ -277,6 +300,9 @@ export function createCache(options: CacheOptions): Cache {
     const scope = await credentialScope(request.headers);
     const generationNow = generation(resource);
     if (request.method !== "GET") {
+      if (!WRITE_METHODS.has(request.method)) {
+        return undefined; // HEAD, OPTIONS and the like change nothing
+      }
       const policy = policyFor(resource, ctx.apiVersion);
       return policy?.enabled === true
         ? {
