@@ -187,5 +187,8 @@ describe("manifest per caller", () => {
     tokens.current = "token-b";
     await client.manifest();
     expect(loads()).toBe(2);
+    tokens.current = "token-a"; // only the latest caller's manifest is kept
+    await client.manifest();
+    expect(loads()).toBe(3);
   });
 });

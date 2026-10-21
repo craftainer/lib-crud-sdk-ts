@@ -178,10 +178,19 @@ describe("discovery", () => {
     ).toBe("https://a.test/api/_crud/manifest");
     expect(
       manifestUrlFromCatalog(
+        catalog("https://a.test/other/m"),
+        "https://a.test/c",
+      ),
+    ).toBe("https://a.test/other/m");
+  });
+
+  it("refuses a link to another origin (the token would follow)", () => {
+    expect(() =>
+      manifestUrlFromCatalog(
         catalog("https://other.test/m"),
         "https://a.test/c",
       ),
-    ).toBe("https://other.test/m");
+    ).toThrow(/another origin/);
   });
 
   it.each([

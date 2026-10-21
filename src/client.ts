@@ -646,6 +646,9 @@ export class CrudClient {
         this.#manifestUrl,
       );
       loading = started;
+      if (!this.#manifests.has(scope)) {
+        this.#manifests.clear(); // rotated tokens must not pile up manifests
+      }
       this.#manifests.set(scope, started);
       started.catch(() => {
         if (this.#manifests.get(scope) === started) {

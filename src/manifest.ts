@@ -372,7 +372,14 @@ export function manifestUrlFromCatalog(
         link["profile"] === PROFILE &&
         typeof link["href"] === "string"
       ) {
-        return new URL(link["href"], catalogUrl).href;
+        const url = new URL(link["href"], catalogUrl);
+        if (url.origin !== new URL(catalogUrl).origin) {
+          // The client sends its bearer token to this URL: stay on the server's origin.
+          throw new ManifestError(
+            `the api-catalog points at another origin (${url.origin}); pass manifestUrl to use it`,
+          );
+        }
+        return url.href;
       }
     }
   }
