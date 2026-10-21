@@ -1,11 +1,15 @@
-// Example entry point `.`: replace with the real public API (see docs/TEMPLATE.md).
-import { add } from "./core.ts";
-
-/** Return the sum of `values` (0 when empty). */
-export function total(values: Iterable<number>): number {
-  let result = 0;
-  for (const value of values) {
-    result = add(result, value);
-  }
-  return result;
-}
+// Entry point `.`: the zero-dependency fetch client. TS1 adds the client,
+// query builder, errors and auth; the shared contracts (I3) live in
+// `interfaces.ts`.
+export type {
+  CacheEntry,
+  CacheStore,
+  CrudEvent,
+  MaybePromise,
+  Middleware,
+  Next,
+  Op,
+  RequestContext,
+  TokenProvider,
+} from "./interfaces.ts";
+export { composeMiddleware } from "./interfaces.ts";

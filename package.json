@@ -1,7 +1,7 @@
 {
-  "name": "template-npm-package",
+  "name": "@craftainer/crud-sdk",
   "version": "0.0.0",
-  "description": "Example ESM TypeScript package: replace with the real description.",
+  "description": "Typed fetch client for craftainer CRUD APIs: manifest-driven resources, query builder, problem-details errors, opt-in cache with SSE invalidation and TanStack Query helpers.",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "sideEffects": false,
@@ -14,14 +14,21 @@
   ],
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.mts",
+  "bin": {
+    "crud-sdk-codegen": "./dist/codegen/cli.mjs"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.mts",
       "default": "./dist/index.mjs"
     },
-    "./extra": {
-      "types": "./dist/extra.d.mts",
-      "default": "./dist/extra.mjs"
+    "./cache": {
+      "types": "./dist/cache/index.d.mts",
+      "default": "./dist/cache/index.mjs"
+    },
+    "./tanstack": {
+      "types": "./dist/tanstack/index.d.mts",
+      "default": "./dist/tanstack/index.mjs"
     },
     "./package.json": "./package.json"
   },
@@ -36,10 +43,28 @@
     "attw": "attw --pack . --profile esm-only",
     "lockfile": "pnpm install --frozen-lockfile --lockfile-only"
   },
+  "dependencies": {},
+  "peerDependencies": {
+    "@tanstack/query-core": "^5.90.0",
+    "json-schema-to-typescript": "^16.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@tanstack/query-core": {
+      "optional": true
+    },
+    "json-schema-to-typescript": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@tanstack/query-core": "5.104.5",
     "@types/node": "24.19.2",
     "@vitest/coverage-v8": "5.0.5",
+    "eventsource-parser": "4.1.2",
+    "fake-indexeddb": "6.2.6",
+    "idb": "8.0.4",
+    "json-schema-to-typescript": "16.0.0",
     "oxlint": "1.89.0",
     "prettier": "3.9.10",
     "publint": "0.3.25",
