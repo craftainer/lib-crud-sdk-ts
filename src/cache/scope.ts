@@ -1,4 +1,4 @@
-import { cacheScope } from "../auth.ts";
+import { ANON, cacheScope } from "../auth.ts";
 
 /**
  * `"anon"` when the request has no Authorization header; otherwise the first
@@ -11,7 +11,7 @@ import { cacheScope } from "../auth.ts";
 export async function credentialScope(headers: Headers): Promise<string> {
   const value = headers.get("authorization");
   if (value === null) {
-    return "anon";
+    return ANON;
   }
   const credential = /^bearer\s+(.+)$/i.exec(value)?.[1] ?? value;
   return cacheScope(credential);

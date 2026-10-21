@@ -85,7 +85,10 @@ describe("invalidateOnEvents with several subscribers", () => {
     const stopA = invalidateOnEvents(cache, a.hub, "heroes");
     const stopB = invalidateOnEvents(cache, b.hub, "heroes");
     cache.setEventsActive("heroes", true);
+    a.handlers[0]!.onStatus?.(true);
+    b.handlers[0]!.onStatus?.(true);
     stopA();
+    stopA(); // idempotent
     expect(cache.eventsActive("heroes")).toBe(true);
     stopB();
     expect(cache.eventsActive("heroes")).toBe(false);

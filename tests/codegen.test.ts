@@ -76,6 +76,7 @@ describe("title stripping", () => {
       title: "Extra",
       type: "object",
       default: { title: "Untitled" },
+      properties: { default: { title: "Gone", type: "string" } },
       examples: [{ title: "x" }],
     };
     const seen: string[] = [];
@@ -88,6 +89,7 @@ describe("title stripping", () => {
     expect(read).toContain('"default":{"title":"Untitled"}');
     expect(read).toContain('"examples":[{"title":"x"}]');
     expect(read).not.toContain('"title":"Extra"');
+    expect(read).not.toContain('"title":"Gone"'); // a field called "default"
   });
 });
 

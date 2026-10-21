@@ -52,9 +52,10 @@ function withoutTitles(node: unknown, isPropertyMap = false): unknown {
   for (const [key, value] of Object.entries(node)) {
     if (isPropertyMap || key !== "title" || typeof value !== "string") {
       // Data keywords hold values, not schemas: leave them whole.
-      out[key] = DATA_KEYWORDS.has(key)
-        ? value
-        : withoutTitles(value, !isPropertyMap && key === "properties");
+      out[key] =
+        !isPropertyMap && DATA_KEYWORDS.has(key)
+          ? value
+          : withoutTitles(value, !isPropertyMap && key === "properties");
     }
   }
   return out;

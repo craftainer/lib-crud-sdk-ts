@@ -2,8 +2,8 @@
 import type { EventHub } from "../events.ts";
 import type { Cache } from "./middleware.ts";
 
-/** Live `invalidateOnEvents` subscriptions per cache and resource. */
-const subscribers = new WeakMap<Cache, Map<string, number>>();
+/** The subscriptions that currently see a connected stream, per cache and resource. */
+const connected = new WeakMap<Cache, Map<string, Set<object>>>();
 
 /**
  * Subscribe `cache` to `hub` for the manifest resource `resource`. Events
@@ -16,23 +16,28 @@ export function invalidateOnEvents(
   hub: EventHub,
   resource: string,
 ): () => void {
-  const counts = subscribers.get(cache) ?? new Map<string, number>();
-  subscribers.set(cache, counts);
-  counts.set(resource, (counts.get(resource) ?? 0) + 1);
+  const byResource = connected.get(cache) ?? new Map<string, Set<object>>();
+  connected.set(cache, byResource);
+  const live = byResource.get(resource) ?? new Set<object>();
+  byResource.set(resource, live);
+  const self = {}; // this subscription's identity
+  // The gate is open while any subscription sees a connected stream.
+  const mark = (up: boolean): void => {
+    if (up) {
+      live.add(self);
+    } else {
+      live.delete(self);
+    }
+    cache.setEventsActive(resource, live.size > 0);
+  };
   const unsubscribe = hub.subscribe({
     onEvent: (event) =>
       cache.invalidateEvent(resource, event.action, event.recordId),
     onReset: () => cache.clearResource(resource),
-    onStatus: (connected) => {
-      cache.setEventsActive(resource, connected);
-    },
+    onStatus: mark,
   });
   return () => {
     unsubscribe();
-    const left = (counts.get(resource) as number) - 1;
-    counts.set(resource, left);
-    if (left === 0) {
-      cache.setEventsActive(resource, false); // the last one out closes the gate
-    }
+    mark(false); // idempotent: the last one out closes the gate
   };
 }
