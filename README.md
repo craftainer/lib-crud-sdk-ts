@@ -1,75 +1,176 @@
-# template-npm-package
+# @craftainer/crud-sdk
 
 > [!NOTE]
 > This repository is vibe coded with [Claude](https://claude.com/product/claude-code).
 
-A template for a typed, tested and publishable ESM TypeScript npm package:
-pnpm (via Corepack), a `tsdown` build with generated declarations, strict
-`tsc`, `vitest` with a 100% coverage gate, `oxlint`, `prettier`, `publint`
-and `arethetypeswrong`, and a release that publishes to npm through trusted
-publishing with provenance. It is itself an instance of
-[`template-base`](https://github.com/craftainer/template-base) (so it gets
-the devcontainer, CI, release workflow and template sync from there) and is
-itself a template: a package created from it receives fixes through template
-sync. See [`docs/TEMPLATE.md`](docs/TEMPLATE.md) for the conventions shared
-by every instance, and
-[`docs/adrs/0001-npm-package-template.md`](docs/adrs/0001-npm-package-template.md)
-for why it exists.
+Typed `fetch` client for craftainer CRUD APIs (the TypeScript twin of the
+Python `crud-sdk`): manifest-driven resources, a query builder, RFC 9457
+problem-details errors, an opt-in cache with SSE invalidation, and TanStack
+Query helpers. ESM only. Created from
+[`template-npm-package`](https://github.com/craftainer/template-npm-package);
+the shared conventions are in [`docs/TEMPLATE.md`](docs/TEMPLATE.md).
 
-## Creating a package from this template
+## Entry points
 
-1. On GitHub, use "Use this template" on this repository (or
-   `gh repo create <org>/<name> --template craftainer/template-npm-package`).
-2. Rename the package: `package.json`'s `name` to `@craftainer/<name>`, its
-   description, and this file's title and description. Edit `src/`,
-   `tests/`, and the `exports` map together with `tsdown.config.ts`'s
-   `entry`. Then run `pnpm install` to refresh `pnpm-lock.yaml`.
-3. Point template sync at this template. `.github/template-sync-state.json`
-   here records the `template-base` tag this template itself last synced
-   from; the copy in a new package must instead name this repository and
-   the tag it was created at (the latest release of
-   `craftainer/template-npm-package`):
+| Import                          | Source                  | Contents                                                                                                                                                         |
+| ------------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@craftainer/crud-sdk`          | `src/index.ts`          | The client core and the shared contracts in `src/interfaces.ts` (`CacheStore`, `Middleware`, `RequestContext`, `TokenProvider`, `CrudEvent`). Zero dependencies. |
+| `@craftainer/crud-sdk/cache`    | `src/cache/index.ts`    | Cache middleware, memory and IndexedDB stores, SSE invalidation.                                                                                                 |
+| `@craftainer/crud-sdk/tanstack` | `src/tanstack/index.ts` | `queryOptions` factories, key factory, invalidation bridge.                                                                                                      |
+| `crud-sdk-codegen` (bin)        | `src/codegen/cli.ts`    | Writes TypeScript types from a manifest.                                                                                                                         |
 
-   ```json
-   {
-     "template_repo": "craftainer/template-npm-package",
-     "synced_tag": "vX.Y.Z"
-   }
-   ```
+The package has no `dependencies`. `idb` and `eventsource-parser` are dev
+dependencies that `tsdown` inlines (`noExternal`). `@tanstack/query-core`
+(for `./tanstack`) and `json-schema-to-typescript` (for the codegen bin) are
+optional peer dependencies.
 
-   Add a `TEMPLATE_SYNC_TOKEN` secret too (see `.github/workflows/README.md`,
-   "Template sync"). Files the package owns beyond the manifest's `ignore`
-   tier go in `.github/template-sync-manifest.local.yml` under `ignore:`.
+Add or remove an entry point in `package.json`'s `exports`/`bin` and
+`tsdown.config.ts`'s `entry` together.
 
-4. Open the repository in the devcontainer, then run
-   `prek run --all-files --hook-stage manual`; everything should pass before
-   you write any code.
-5. Keep `LICENSE` (GPL-3.0) or replace it with the license you choose.
+## Client
 
-## Publishing to npm
+```ts
+import { createClient } from "@craftainer/crud-sdk";
 
-`make publish` is a no-op until you opt in by setting the repository
-variable `NPM_PUBLISH` (any non-empty value). npm has no pending publishers,
-so the first release is bootstrapped with a token and every later one uses
-[trusted publishing](https://docs.npmjs.com/trusted-publishers) (GitHub
-OIDC, with provenance), with no token stored:
+const client = createClient({
+  baseUrl: "https://api.example.com",
+  tokenProvider: ({ refresh }) => getToken({ refresh }), // optional
+  // fetch, middleware, manifestUrl are optional too
+});
+const heroes = await client.resource("heroes"); // highest api_version, or ("heroes", "v1")
+const page = await heroes.list({
+  filters: { power_level__min: 3, name__icontains: "ada" },
+  sort: "-power_level",
+  limit: 50,
+});
+for await (const hero of heroes.iterAll({ filters: { is_locked: false } })) {
+  // pages with skip += limit until a short page
+}
+await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> PreconditionFailed
+```
 
-1. Create the `NPM_TOKEN` secret: a granular token for the `@craftainer`
-   scope with "Read and write (stage only)". Set `NPM_PUBLISH`.
-2. Run the first release. `make publish` runs `npm stage publish`, which
-   stages the tarball without 2FA. Approve it with 2FA: `npm stage list`,
-   then `npm stage approve <stage-id>` (or on npmjs.com). Until then the
-   version is not installable, and `make release-check` says so and passes.
-3. On npmjs.com, add the package's trusted publisher (this repository,
-   workflow `release.yml`), then delete the `NPM_TOKEN` secret. Later
-   releases publish directly through OIDC; npm expires a trusted-publisher
-   configuration that has not published within 48 hours, so do this just
-   before the next release.
+- **Discovery.** The manifest loads on first use through
+  `/.well-known/api-catalog` (the `describedby` link with the manifest
+  profile), or from `manifestUrl`. Manifest types keep the wire member names
+  (`skip_param`, `max_age`, ...) and ignore unknown members.
+- **Operations** (each gated on the manifest's capabilities and `paths`,
+  else `CapabilityError`): `list`, `iterAll`, `get`, `create`, `update`,
+  `updateMany`, `delete`, `deleteMany`, `restore({ id } | { filters })`,
+  `clone`, `createDraft`, `publish`, `filters`, `stats`, `predict`,
+  `revisions`, `eventsUrl()`. Every call takes `{ signal }`. A call that is
+  invalid for the manifest (unknown field or operator, wrong value type, bad
+  sort or paging) rejects with `InvalidQueryError` before any request.
+- **Query strings** are byte for byte those of the Python SDK (a shared
+  table, `tests/fixtures/url-parity.json`, checks both): parameters in the
+  order `id`, filters sorted by (field, operator), sort, skip, limit,
+  `include_archived`, `include_unpublished`; everything but `A-Za-z0-9-._~`
+  percent-encoded; datetimes are `Date`s sent as UTC with milliseconds
+  trimmed; `date` fields take `YYYY-MM-DD` strings.
+- **Errors.** `ProblemError` (RFC 9457) with subclasses `BadRequest`,
+  `Unauthorized`, `Forbidden`, `NotFound`, `PreconditionFailed`,
+  `ValidationFailed` (`errors`), `Locked`, `RateLimited` (`retryAfter`),
+  `ServerError`; `ConnectionFailed` for transport failures (an abort passes
+  through unchanged). All extend `CrudError`.
+- **Auth.** The token provider is called per request; after a `401` it is
+  called once with `{ refresh: true }` and the request is retried only if
+  the token changed. The cache scope is `"anon"` or the first 32 hex of the
+  SHA-256 of the whole token (never decoded).
+- **Middleware.** `createClient({ middleware })` or `client.use(mw)` (added
+  innermost). Each request carries a `RequestContext` (`resource`, `op`,
+  `recordId`, `scope`, `apiVersion`, `signal`).
+- **Typed records.** `client.resource<Read, Create, Update>("heroes")` takes
+  the interfaces written by the codegen below (not checked at runtime).
 
-The version lives only in the git tag `release.yml` computes;
-`package.json` stays at `0.0.0` and `make build` stamps `RELEASE_VERSION`
-into the build without committing it. Details: `docs/TEMPLATE.md`, "Package
-template notes".
+## Codegen
+
+```sh
+CRUD_SDK_TOKEN=... crud-sdk-codegen --manifest https://api.example.com --out src/crud-types.ts
+crud-sdk-codegen --manifest ./manifest.json --out src/crud-types.ts
+```
+
+Writes `<Name><Version>Read|Create|Update` (and `Draft`) interfaces per
+resource from the manifest's JSON Schemas. `--manifest` is a manifest URL, a
+server origin (discovers through the api-catalog) or a file; the optional
+peer `json-schema-to-typescript` must be installed.
+
+## Caching / TanStack
+
+`createCache({ store, policies })` (from `./cache`) returns two `Middleware`:
+`cache.middleware` and `cache.autoIfMatch`. Put both **innermost**, after
+whatever sets `Authorization`: the cache scope is `anon` without an
+Authorization header, else the first 32 hex characters of the SHA-256 of the
+whole credential, taken from the request as it is sent. `policies` maps
+manifest resource names to `cachePolicyFromManifest(resource)` (plain I1
+objects, snake_case members).
+
+- Every read revalidates (`If-None-Match`, `304` rebuilt from the store).
+  `max_age`/`stale_while_revalidate` freshness applies only while the
+  resource's SSE stream is connected, never with `cache.revalidate_only`.
+- Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
+events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
+  never apply snapshots. `subscribeEvents` is the lower-level entry.
+- Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
+  `clearMany(prefixes)` is optional on a custom `CacheStore`.
+- `cacheStatus(response)` says `hit`, `stale`, `revalidated` or `miss`;
+  `cache.close()` stops background refreshes.
+
+`./tanstack` has no runtime dependency on `@tanstack/query-core`: `crudKeys`,
+`listOptions`/`recordOptions`/`statsOptions`/`predictOptions`/
+`revisionsOptions`/`manifestOptions`, `infiniteListOptions`, the
+`create`/`update`/`deleteMutationOptions` and `bridgeEvents(queryClient, hub,
+resource)`. Use `tanstackCachePolicy` so the SDK cache only revalidates and
+TanStack's `staleTime` owns freshness. The factories take structural slices (`list(query, { signal })`, ...), which
+the client's options-object methods do not match for `list`, `stats`,
+`predict` and the manifest. `tanstackApi(client, resource)` (from
+`./tanstack`) binds one `ResourceClient` to all of them; a query is the
+client's `ListOptions` (`{ filters, sort, skip, limit, ... }`) without
+`signal`, which TanStack's `signal` fills in.
+
+```ts
+import { createClient } from "@craftainer/crud-sdk";
+import {
+  createCache,
+  MemoryStore,
+  cachePolicyFromManifest,
+} from "@craftainer/crud-sdk/cache";
+import { listOptions, tanstackApi } from "@craftainer/crud-sdk/tanstack";
+
+const cache = createCache({
+  store: new MemoryStore(),
+  policies: { heroes: cachePolicyFromManifest(heroesManifestEntry) },
+});
+const client = createClient({
+  baseUrl,
+  middleware: [cache.middleware, cache.autoIfMatch],
+});
+const api = tanstackApi(client, await client.resource("heroes"));
+useQuery(listOptions("heroes", api, { limit: 50 }));
+```
+
+Cache keys carry no server origin, so a store shared between servers needs a
+per-origin namespace: give each server its own `MemoryStore` or its own
+`IndexedDbStore({ name })` (the IndexedDB database name). The key format does
+not change.
+
+`policies` is keyed by `name@apiVersion` (built from that version's manifest
+entry) or by plain `name` for every version; the event stream and the
+freshness gate are per resource name, and the gate stays open while at least
+one subscription for that resource is connected. `filters` entries are never
+served fresh.
+
+The cache scope is the same on both sides: `client.scope()` equals
+`credentialScope` of the `Authorization` header the client sends (an empty
+token sends no header and is `anon`). `cache.autoIfMatch` reads `recordId`,
+the resource and `apiVersion` from the client's request context, so
+`update`/`delete` without `ifMatch` send the ETag cached for that caller.
+
+See
+[`docs/adrs/0002-cache-freshness-and-event-invalidation.md`](docs/adrs/0002-cache-freshness-and-event-invalidation.md).
+
+## Development
+
+Open the repository in the devcontainer, then run
+`prek run --all-files --hook-stage manual`.
 
 ## License
 
