@@ -93,6 +93,35 @@ resource from the manifest's JSON Schemas. `--manifest` is a manifest URL, a
 server origin (discovers through the api-catalog) or a file; the optional
 peer `json-schema-to-typescript` must be installed.
 
+## Caching / TanStack
+
+`createCache({ store, policies })` (from `./cache`) returns two `Middleware`:
+`cache.middleware` and `cache.autoIfMatch`. Put both **innermost**, after
+whatever sets `Authorization`: the cache scope is `anon` without an
+Authorization header, else the first 32 hex characters of the SHA-256 of the
+whole credential, taken from the request as it is sent. `policies` maps
+manifest resource names to `cachePolicyFromManifest(resource)` (plain I1
+objects, snake_case members).
+
+- Every read revalidates (`If-None-Match`, `304` rebuilt from the store).
+  `max_age`/`stale_while_revalidate` freshness applies only while the
+  resource's SSE stream is connected, never with `cache.revalidate_only`.
+- Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
+events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
+  never apply snapshots. `subscribeEvents` is the lower-level entry.
+- Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
+  `clearMany(prefixes)` is optional on a custom `CacheStore`.
+- `cacheStatus(response)` says `hit`, `stale`, `revalidated` or `miss`;
+  `cache.close()` stops background refreshes.
+
+`./tanstack` has no runtime dependency on `@tanstack/query-core`: `crudKeys`,
+`listOptions`/`recordOptions`/`statsOptions`/`predictOptions`/
+`revisionsOptions`/`manifestOptions`, `infiniteListOptions`, the
+`create`/`update`/`deleteMutationOptions` and `bridgeEvents(queryClient, hub,
+resource)`. Use `tanstackCachePolicy` so the SDK cache only revalidates and
+TanStack's `staleTime` owns freshness. See
+[`docs/adrs/0002-cache-freshness-and-event-invalidation.md`](docs/adrs/0002-cache-freshness-and-event-invalidation.md).
+
 ## Development
 
 Open the repository in the devcontainer, then run
