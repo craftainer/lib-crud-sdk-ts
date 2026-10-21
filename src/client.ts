@@ -1,0 +1,679 @@
+/** Fetch client: manifest-driven resource handles over a middleware chain. */
+import { cacheScope } from "./auth.ts";
+import {
+  CapabilityError,
+  ConnectionFailed,
+  InvalidQueryError,
+  ManifestError,
+  UnknownResourceError,
+  problemFromResponse,
+} from "./errors.ts";
+import { composeMiddleware } from "./interfaces.ts";
+import type { Middleware, Op, TokenProvider } from "./interfaces.ts";
+import { findResource, loadManifest } from "./manifest.ts";
+import type { JsonObject, Manifest, Resource } from "./manifest.ts";
+import { buildQuery, encodeParams } from "./query.ts";
+import type { Filters, QueryParams, Sort } from "./query.ts";
+
+/** Per-call options. */
+export interface RequestOptions {
+  readonly signal?: AbortSignal | undefined;
+}
+
+/** Options of `list` and `iterAll`. */
+export interface ListOptions extends RequestOptions {
+  readonly filters?: Filters | undefined;
+  readonly sort?: Sort | undefined;
+  readonly skip?: number | undefined;
+  readonly limit?: number | undefined;
+  readonly includeArchived?: boolean | undefined;
+  readonly includeUnpublished?: boolean | undefined;
+}
+
+/** Options of `update` and `delete`: `ifMatch` is an ETag (`412` when stale). */
+export interface WriteOptions extends RequestOptions {
+  readonly ifMatch?: string | undefined;
+}
+
+/** Options of `stats`. */
+export interface StatsOptions extends RequestOptions {
+  readonly bucket?: string | undefined;
+  readonly includeArchived?: boolean | undefined;
+  readonly includeUnpublished?: boolean | undefined;
+}
+
+/** Options of `predict`. */
+export interface PredictOptions extends RequestOptions {
+  readonly field?: string | undefined;
+  readonly periods?: number | undefined;
+  readonly bucket?: string | undefined;
+}
+
+/** Options of `restore`: exactly one of `id` and `filters`. */
+export interface RestoreOptions extends RequestOptions {
+  readonly id?: number | undefined;
+  readonly filters?: Filters | undefined;
+}
+
+/** The result of a bulk call. */
+export interface BulkResult {
+  readonly matched: number;
+  readonly ids: readonly number[];
+}
+
+export interface Call {
+  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  readonly url: string;
+  readonly op: Op;
+  readonly resource: string | undefined;
+  readonly recordId: number | undefined;
+  readonly apiVersion: string | null;
+  readonly json?: unknown;
+  readonly headers?: Readonly<Record<string, string>>;
+}
+
+/** What a {@link ResourceClient} needs from its client. */
+export interface Transport {
+  json(call: Call, signal: AbortSignal | undefined): Promise<unknown>;
+  none(call: Call, signal: AbortSignal | undefined): Promise<void>;
+}
+
+const joinUrl = (base: string, path: string): string =>
+  new URL(path, base).href;
+
+/** Builds the requests of one resource. */
+class Plan {
+  readonly #baseUrl: string;
+  readonly resource: Resource;
+
+  constructor(baseUrl: string, resource: Resource) {
+    this.#baseUrl = baseUrl;
+    this.resource = resource;
+  }
+
+  #call(
+    method: Call["method"],
+    op: Op,
+    path: string,
+    query = "",
+    extra: {
+      recordId?: number | undefined;
+      json?: unknown;
+      ifMatch?: string | undefined;
+    } = {},
+  ): Call {
+    const url =
+      joinUrl(this.#baseUrl, path) + (query === "" ? "" : `?${query}`);
+    return {
+      method,
+      url,
+      op,
+      resource: this.resource.name,
+      recordId: extra.recordId,
+      apiVersion: this.resource.api_version,
+      ...(extra.json === undefined ? {} : { json: extra.json }),
+      ...(extra.ifMatch === undefined
+        ? {}
+        : { headers: { "If-Match": extra.ifMatch } }),
+    };
+  }
+
+  #query(params: QueryParams = {}): string {
+    const paging = this.resource.pagination;
+    return buildQuery(this.resource.fields, {
+      maxLimit: paging.max_limit,
+      skipParam: paging.skip_param,
+      limitParam: paging.limit_param,
+      sortParam: paging.sort_param,
+      ...params,
+    });
+  }
+
+  #subPath(key: string, supported: boolean): string {
+    const path = this.resource.paths[key];
+    if (!supported || path === undefined) {
+      throw new CapabilityError(
+        `resource "${this.resource.name}" does not support ${key}`,
+      );
+    }
+    return path;
+  }
+
+  #need(supported: boolean, what: string): void {
+    if (!supported) {
+      throw new CapabilityError(
+        `resource "${this.resource.name}" does not support ${what}`,
+      );
+    }
+  }
+
+  #bulkFilters(filters: Filters): string {
+    if (Object.keys(filters).length === 0) {
+      throw new InvalidQueryError("a bulk operation needs at least one filter");
+    }
+    return this.#query({ filters });
+  }
+
+  get #base(): string {
+    return this.resource.base_path;
+  }
+
+  eventsUrl(): string {
+    const events = this.resource.capabilities.events;
+    if (events === null) {
+      throw new CapabilityError(
+        `resource "${this.resource.name}" does not support events`,
+      );
+    }
+    return joinUrl(this.#baseUrl, events.path);
+  }
+
+  list(o: ListOptions): Call {
+    const query = this.#query({
+      filters: o.filters,
+      sort: o.sort,
+      skip: o.skip,
+      limit: o.limit,
+      includeArchived: o.includeArchived,
+      includeUnpublished: o.includeUnpublished,
+    });
+    return this.#call("GET", "list", this.#base, query);
+  }
+
+  get(id: number): Call {
+    return this.#call(
+      "GET",
+      "record",
+      this.#base,
+      this.#query({ recordId: id }),
+      {
+        recordId: id,
+      },
+    );
+  }
+
+  create(data: unknown): Call {
+    return this.#call("POST", "create", this.#base, "", { json: data });
+  }
+
+  update(id: number, data: unknown, ifMatch: string | undefined): Call {
+    return this.#call(
+      "PATCH",
+      "update",
+      this.#base,
+      this.#query({ recordId: id }),
+      {
+        recordId: id,
+        json: data,
+        ifMatch,
+      },
+    );
+  }
+
+  updateMany(filters: Filters, data: unknown): Call {
+    this.#need(this.resource.capabilities.bulk_update, "bulk_update");
+    return this.#call(
+      "PATCH",
+      "bulk_update",
+      this.#base,
+      this.#bulkFilters(filters),
+      {
+        json: data,
+      },
+    );
+  }
+
+  delete(id: number, ifMatch: string | undefined): Call {
+    return this.#call(
+      "DELETE",
+      "delete",
+      this.#base,
+      this.#query({ recordId: id }),
+      {
+        recordId: id,
+        ifMatch,
+      },
+    );
+  }
+
+  deleteMany(filters: Filters): Call {
+    this.#need(this.resource.capabilities.bulk_delete, "bulk_delete");
+    return this.#call(
+      "DELETE",
+      "bulk_delete",
+      this.#base,
+      this.#bulkFilters(filters),
+    );
+  }
+
+  restore(id: number | undefined, filters: Filters | undefined): Call {
+    const path = this.#subPath(
+      "restore",
+      this.resource.capabilities.archive_restore,
+    );
+    if ((id === undefined) === (filters === undefined)) {
+      throw new InvalidQueryError(
+        "restore takes exactly one of id and filters",
+      );
+    }
+    const query =
+      filters === undefined
+        ? this.#query({ recordId: id })
+        : this.#bulkFilters(filters);
+    return this.#call("POST", "restore", path, query, { recordId: id });
+  }
+
+  stats(o: StatsOptions): Call {
+    const path = this.#subPath("stats", this.resource.capabilities.stats);
+    const pairs: [string, string][] =
+      o.bucket === undefined ? [] : [["bucket", o.bucket]];
+    if (o.includeArchived !== undefined) {
+      pairs.push(["include_archived", String(o.includeArchived)]);
+    }
+    if (o.includeUnpublished !== undefined) {
+      pairs.push(["include_unpublished", String(o.includeUnpublished)]);
+    }
+    return this.#call("GET", "stats", path, encodeParams(pairs));
+  }
+
+  predict(o: PredictOptions): Call {
+    const path = this.#subPath("predict", this.resource.capabilities.predict);
+    const pairs: [string, string][] = [];
+    if (o.field !== undefined) {
+      const spec = this.resource.fields.find((f) => f.name === o.field);
+      if (spec === undefined || !spec.numeric) {
+        throw new InvalidQueryError(
+          `cannot predict "${o.field}": not a numeric field`,
+        );
+      }
+      pairs.push(["field", o.field]);
+    }
+    if (o.periods !== undefined) {
+      if (!Number.isSafeInteger(o.periods) || o.periods < 1) {
+        throw new InvalidQueryError("periods must be an integer >= 1");
+      }
+      pairs.push(["periods", String(o.periods)]);
+    }
+    if (o.bucket !== undefined) {
+      pairs.push(["bucket", o.bucket]);
+    }
+    return this.#call("GET", "predict", path, encodeParams(pairs));
+  }
+
+  clone(id: number): Call {
+    const path = this.#subPath("clone", this.resource.capabilities.clone);
+    return this.#call("POST", "clone", path, this.#query({ recordId: id }), {
+      recordId: id,
+    });
+  }
+
+  draft(data: unknown): Call {
+    const path = this.#subPath(
+      "draft",
+      this.resource.capabilities.draft_publish,
+    );
+    return this.#call("POST", "draft", path, "", { json: data });
+  }
+
+  publish(id: number): Call {
+    const path = this.#subPath(
+      "publish",
+      this.resource.capabilities.draft_publish,
+    );
+    return this.#call("POST", "publish", path, this.#query({ recordId: id }), {
+      recordId: id,
+    });
+  }
+
+  filters(): Call {
+    return this.#call("GET", "filters", this.#subPath("filters", true));
+  }
+
+  revisions(id: number): Call {
+    const path = this.#subPath(
+      "revisions",
+      this.resource.capabilities.revisions,
+    );
+    return this.#call("GET", "revisions", path, this.#query({ recordId: id }), {
+      recordId: id,
+    });
+  }
+}
+
+/**
+ * Operations on one resource. The type parameters are the record views;
+ * `crud-sdk-codegen` writes interfaces to pass for them (they are not
+ * checked against the manifest at runtime).
+ */
+export class ResourceClient<
+  Read extends object = JsonObject,
+  Create extends object = JsonObject,
+  Update extends object = JsonObject,
+> {
+  /** The manifest entry this handle is bound to. */
+  readonly resource: Resource;
+  readonly #plan: Plan;
+  readonly #transport: Transport;
+
+  /** Use `CrudClient.resource`. */
+  constructor(baseUrl: string, resource: Resource, transport: Transport) {
+    this.resource = resource;
+    this.#plan = new Plan(baseUrl, resource);
+    this.#transport = transport;
+  }
+
+  async #one<T>(call: Call, options: RequestOptions): Promise<T> {
+    return (await this.#transport.json(call, options.signal)) as T;
+  }
+
+  /** One page of records. */
+  async list(options: ListOptions = {}): Promise<Read[]> {
+    return this.#one(this.#plan.list(options), options);
+  }
+
+  /** Every record, paging with `skip += limit` until a page shorter than `limit`. */
+  async *iterAll(
+    options: ListOptions = {},
+  ): AsyncGenerator<Read, void, undefined> {
+    const size = options.limit ?? this.resource.pagination.default_limit;
+    let skip = options.skip ?? 0;
+    for (;;) {
+      const page = await this.list({ ...options, skip, limit: size });
+      yield* page;
+      if (page.length < size) {
+        return;
+      }
+      skip += size;
+    }
+  }
+
+  /** One record. */
+  async get(id: number, options: RequestOptions = {}): Promise<Read> {
+    return this.#one(this.#plan.get(id), options);
+  }
+
+  /** Creates a record. */
+  async create(data: Create, options: RequestOptions = {}): Promise<Read> {
+    return this.#one(this.#plan.create(data), options);
+  }
+
+  /** Patches one record; `ifMatch` is an ETag (`412` when stale). */
+  async update(
+    id: number,
+    data: Update,
+    options: WriteOptions = {},
+  ): Promise<Read> {
+    return this.#one(this.#plan.update(id, data, options.ifMatch), options);
+  }
+
+  /** Patches every record matching `filters`. */
+  async updateMany(
+    filters: Filters,
+    data: Update,
+    options: RequestOptions = {},
+  ): Promise<BulkResult> {
+    return this.#one(this.#plan.updateMany(filters, data), options);
+  }
+
+  /** Deletes one record; `ifMatch` as for `update`. */
+  async delete(id: number, options: WriteOptions = {}): Promise<void> {
+    await this.#transport.none(
+      this.#plan.delete(id, options.ifMatch),
+      options.signal,
+    );
+  }
+
+  /** Deletes every record matching `filters`. */
+  async deleteMany(
+    filters: Filters,
+    options: RequestOptions = {},
+  ): Promise<BulkResult> {
+    return this.#one(this.#plan.deleteMany(filters), options);
+  }
+
+  /** Restores archived records, by `id` or by `filters`. */
+  async restore(options: RestoreOptions): Promise<BulkResult> {
+    return this.#one(this.#plan.restore(options.id, options.filters), options);
+  }
+
+  /** Aggregates over the resource. */
+  async stats(options: StatsOptions = {}): Promise<JsonObject> {
+    return this.#one(this.#plan.stats(options), options);
+  }
+
+  /** A forecast. */
+  async predict(options: PredictOptions = {}): Promise<JsonObject> {
+    return this.#one(this.#plan.predict(options), options);
+  }
+
+  /** Copies a record; returns the copy. */
+  async clone(id: number, options: RequestOptions = {}): Promise<Read> {
+    return this.#one(this.#plan.clone(id), options);
+  }
+
+  /** Creates a draft (needs `draft_publish`). */
+  async createDraft(data: Create, options: RequestOptions = {}): Promise<Read> {
+    return this.#one(this.#plan.draft(data), options);
+  }
+
+  /** Publishes a draft (needs `draft_publish`). */
+  async publish(id: number, options: RequestOptions = {}): Promise<Read> {
+    return this.#one(this.#plan.publish(id), options);
+  }
+
+  /** The server's filter metadata (`kind` instead of `value_type`). */
+  async filters(options: RequestOptions = {}): Promise<JsonObject[]> {
+    return this.#one(this.#plan.filters(), options);
+  }
+
+  /** Revisions of one record, newest first. */
+  async revisions(
+    id: number,
+    options: RequestOptions = {},
+  ): Promise<JsonObject[]> {
+    return this.#one(this.#plan.revisions(id), options);
+  }
+
+  /** Absolute URL of the resource's SSE stream. */
+  eventsUrl(): string {
+    return this.#plan.eventsUrl();
+  }
+}
+
+/** Options of {@link createClient}. */
+export interface ClientOptions {
+  /** The server origin (or any URL on it). */
+  readonly baseUrl: string;
+  /** The network `fetch`; defaults to `globalThis.fetch`. */
+  readonly fetch?: typeof fetch | undefined;
+  /** Returns the bearer token; called again with `refresh: true` once after a `401`. */
+  readonly tokenProvider?: TokenProvider | undefined;
+  /** Outermost first; see `composeMiddleware`. */
+  readonly middleware?: readonly Middleware[] | undefined;
+  /** Skips api-catalog discovery. */
+  readonly manifestUrl?: string | undefined;
+}
+
+/** Discovers the manifest and hands out {@link ResourceClient}s. */
+export class CrudClient {
+  readonly baseUrl: string;
+  readonly #fetch: typeof fetch | undefined;
+  readonly #tokenProvider: TokenProvider | undefined;
+  readonly #middleware: Middleware[];
+  readonly #manifestUrl: string | undefined;
+  #manifest: Promise<Manifest> | undefined;
+  readonly #transport: Transport;
+
+  constructor(options: ClientOptions) {
+    this.baseUrl = options.baseUrl;
+    this.#fetch = options.fetch;
+    this.#tokenProvider = options.tokenProvider;
+    this.#middleware = [...(options.middleware ?? [])];
+    this.#manifestUrl = options.manifestUrl;
+    this.#transport = {
+      json: async (call, signal) => {
+        const response = await this.#send(call, signal);
+        return response.status === 204
+          ? undefined
+          : ((await response.json()) as unknown);
+      },
+      none: async (call, signal) => {
+        await (await this.#send(call, signal)).body?.cancel();
+      },
+    };
+  }
+
+  /** Adds middleware after the existing ones (innermost); it sees every later request. */
+  use(middleware: Middleware): this {
+    this.#middleware.push(middleware);
+    return this;
+  }
+
+  async #token(refresh: boolean): Promise<string | null> {
+    return (await this.#tokenProvider?.({ refresh })) ?? null;
+  }
+
+  /** The current bearer token, or `null` when anonymous. */
+  token(refresh = false): Promise<string | null> {
+    return this.#token(refresh);
+  }
+
+  /** The cache scope of the current caller (`"anon"` or a hash of the token). */
+  async scope(): Promise<string> {
+    return cacheScope(await this.#token(false));
+  }
+
+  async #dispatch(
+    call: Call,
+    token: string | null,
+    signal: AbortSignal | undefined,
+  ): Promise<Response> {
+    const headers = new Headers({
+      Accept: "application/json",
+      ...call.headers,
+    });
+    if (token !== null) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+    const init: RequestInit = {
+      method: call.method,
+      headers,
+      signal: signal ?? null,
+    };
+    if (call.json !== undefined) {
+      headers.set("Content-Type", "application/json");
+      init.body = JSON.stringify(call.json);
+    }
+    const request = new Request(call.url, init);
+    const terminal = async (ctx: {
+      readonly request: Request;
+    }): Promise<Response> => {
+      try {
+        return await (this.#fetch ?? globalThis.fetch)(ctx.request);
+      } catch (error) {
+        if (ctx.request.signal.aborted) {
+          throw error;
+        }
+        throw new ConnectionFailed(
+          error instanceof Error ? error.message : String(error),
+          {
+            cause: error,
+          },
+        );
+      }
+    };
+    return composeMiddleware(
+      this.#middleware,
+      terminal,
+    )({
+      request,
+      resource: call.resource,
+      op: call.op,
+      recordId: call.recordId,
+      scope: await cacheScope(token),
+      apiVersion: call.apiVersion,
+      signal,
+    });
+  }
+
+  /** Sends `call`, retrying once with a refreshed token after a `401`; throws on `>= 400`. */
+  async #send(call: Call, signal: AbortSignal | undefined): Promise<Response> {
+    const token = await this.#token(false);
+    let response = await this.#dispatch(call, token, signal);
+    if (response.status === 401 && this.#tokenProvider !== undefined) {
+      const fresh = await this.#token(true);
+      if (fresh !== null && fresh !== token) {
+        await response.body?.cancel();
+        response = await this.#dispatch(call, fresh, signal);
+      }
+    }
+    if (response.status >= 400) {
+      throw await problemFromResponse(response);
+    }
+    return response;
+  }
+
+  async #getJson(url: string, catalog: boolean): Promise<unknown> {
+    const call: Call = {
+      method: "GET",
+      url,
+      op: "manifest",
+      resource: undefined,
+      recordId: undefined,
+      apiVersion: null,
+      // The catalog shares the "manifest" op; no-store keeps it out of the manifest cache entry.
+      ...(catalog ? { headers: { "Cache-Control": "no-store" } } : {}),
+    };
+    const response = await this.#send(call, undefined);
+    try {
+      return (await response.json()) as unknown;
+    } catch (error) {
+      throw new ManifestError(`${url} is not JSON`, { cause: error });
+    }
+  }
+
+  /** The manifest for this caller, loaded once (`refresh: true` reloads). */
+  manifest(options: { readonly refresh?: boolean } = {}): Promise<Manifest> {
+    if (this.#manifest === undefined || options.refresh === true) {
+      const loading = loadManifest(
+        (url, catalog) => this.#getJson(url, catalog),
+        this.baseUrl,
+        this.#manifestUrl,
+      );
+      this.#manifest = loading;
+      loading.catch(() => {
+        if (this.#manifest === loading) {
+          this.#manifest = undefined;
+        }
+      });
+    }
+    return this.#manifest;
+  }
+
+  /** A handle for `name` (the highest `api_version` unless given). */
+  async resource<
+    Read extends object = JsonObject,
+    Create extends object = JsonObject,
+    Update extends object = JsonObject,
+  >(
+    name: string,
+    apiVersion?: string,
+  ): Promise<ResourceClient<Read, Create, Update>> {
+    const resource = findResource(await this.manifest(), name, apiVersion);
+    if (resource === undefined) {
+      throw new UnknownResourceError(
+        `the manifest has no resource "${name}"${apiVersion === undefined ? "" : ` ${apiVersion}`} for this caller`,
+      );
+    }
+    return new ResourceClient<Read, Create, Update>(
+      this.baseUrl,
+      resource,
+      this.#transport,
+    );
+  }
+}
+
+/** Creates a client; the manifest loads on first use. */
+export function createClient(options: ClientOptions): CrudClient {
+  return new CrudClient(options);
+}

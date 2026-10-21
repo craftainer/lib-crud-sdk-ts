@@ -27,6 +27,72 @@ optional peer dependencies.
 Add or remove an entry point in `package.json`'s `exports`/`bin` and
 `tsdown.config.ts`'s `entry` together.
 
+## Client
+
+```ts
+import { createClient } from "@craftainer/crud-sdk";
+
+const client = createClient({
+  baseUrl: "https://api.example.com",
+  tokenProvider: ({ refresh }) => getToken({ refresh }), // optional
+  // fetch, middleware, manifestUrl are optional too
+});
+const heroes = await client.resource("heroes"); // highest api_version, or ("heroes", "v1")
+const page = await heroes.list({
+  filters: { power_level__min: 3, name__icontains: "ada" },
+  sort: "-power_level",
+  limit: 50,
+});
+for await (const hero of heroes.iterAll({ filters: { is_locked: false } })) {
+  // pages with skip += limit until a short page
+}
+await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> PreconditionFailed
+```
+
+- **Discovery.** The manifest loads on first use through
+  `/.well-known/api-catalog` (the `describedby` link with the manifest
+  profile), or from `manifestUrl`. Manifest types keep the wire member names
+  (`skip_param`, `max_age`, ...) and ignore unknown members.
+- **Operations** (each gated on the manifest's capabilities and `paths`,
+  else `CapabilityError`): `list`, `iterAll`, `get`, `create`, `update`,
+  `updateMany`, `delete`, `deleteMany`, `restore({ id } | { filters })`,
+  `clone`, `createDraft`, `publish`, `filters`, `stats`, `predict`,
+  `revisions`, `eventsUrl()`. Every call takes `{ signal }`. A call that is
+  invalid for the manifest (unknown field or operator, wrong value type, bad
+  sort or paging) rejects with `InvalidQueryError` before any request.
+- **Query strings** are byte for byte those of the Python SDK (a shared
+  table, `tests/fixtures/url-parity.json`, checks both): parameters in the
+  order `id`, filters sorted by (field, operator), sort, skip, limit,
+  `include_archived`, `include_unpublished`; everything but `A-Za-z0-9-._~`
+  percent-encoded; datetimes are `Date`s sent as UTC with milliseconds
+  trimmed; `date` fields take `YYYY-MM-DD` strings.
+- **Errors.** `ProblemError` (RFC 9457) with subclasses `BadRequest`,
+  `Unauthorized`, `Forbidden`, `NotFound`, `PreconditionFailed`,
+  `ValidationFailed` (`errors`), `Locked`, `RateLimited` (`retryAfter`),
+  `ServerError`; `ConnectionFailed` for transport failures (an abort passes
+  through unchanged). All extend `CrudError`.
+- **Auth.** The token provider is called per request; after a `401` it is
+  called once with `{ refresh: true }` and the request is retried only if
+  the token changed. The cache scope is `"anon"` or the first 32 hex of the
+  SHA-256 of the whole token (never decoded).
+- **Middleware.** `createClient({ middleware })` or `client.use(mw)` (added
+  innermost). Each request carries a `RequestContext` (`resource`, `op`,
+  `recordId`, `scope`, `apiVersion`, `signal`).
+- **Typed records.** `client.resource<Read, Create, Update>("heroes")` takes
+  the interfaces written by the codegen below (not checked at runtime).
+
+## Codegen
+
+```sh
+CRUD_SDK_TOKEN=... crud-sdk-codegen --manifest https://api.example.com --out src/crud-types.ts
+crud-sdk-codegen --manifest ./manifest.json --out src/crud-types.ts
+```
+
+Writes `<Name><Version>Read|Create|Update` (and `Draft`) interfaces per
+resource from the manifest's JSON Schemas. `--manifest` is a manifest URL, a
+server origin (discovers through the api-catalog) or a file; the optional
+peer `json-schema-to-typescript` must be installed.
+
 ## Development
 
 Open the repository in the devcontainer, then run
