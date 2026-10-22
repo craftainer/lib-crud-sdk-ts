@@ -45,7 +45,9 @@ export interface CacheEntry {
 
 /**
  * Cache backend. Keys are opaque, slash-separated strings built by
- * `./cache`'s `cacheKey` (`v1/{resource}/{api_version}/{kind}/...`).
+ * `./cache`'s `cacheKey`
+ * (`v1/{resource}/{kind}/{subject}/{apiVersion}/{scope}/{query}`, with `_`
+ * when there is no apiVersion).
  * `ttlMs` is how long the backend may keep the entry (undefined = backend
  * default); freshness lives in `CacheEntry`. `clear(prefix)` removes every
  * key starting with `prefix`; `clear()` removes everything the store owns.
@@ -73,7 +75,10 @@ export interface RequestContext {
   readonly op: Op;
   /** The record the request targets, when it targets one. */
   readonly recordId: number | undefined;
-  /** "anon", or the first 32 hex characters of the SHA-256 of the whole bearer token. */
+  /**
+   * "anon", or the first 32 hex characters of the SHA-256 of the
+   * Authorization credential actually sent.
+   */
   readonly scope: string;
   /**
    * The resource's `api_version` from the manifest, or `null` when it has
