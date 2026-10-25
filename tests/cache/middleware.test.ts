@@ -862,6 +862,7 @@ describe("stale-while-revalidate", () => {
     const original = new Request(ctxFor("list").request.url, {
       credentials: "include",
       redirect: "manual",
+      cache: "force-cache",
       headers: { "x-trace": "t" },
     });
     const ctx = { ...ctxFor("list"), request: original };
@@ -872,6 +873,7 @@ describe("stale-while-revalidate", () => {
     const refresh = s.net.sent[1];
     expect(refresh?.credentials).toBe("include");
     expect(refresh?.redirect).toBe("manual");
+    expect(refresh?.cache).toBe("no-store"); // never answered from the HTTP cache
     expect(refresh?.headers.get("x-trace")).toBe("t");
   });
 

@@ -630,8 +630,16 @@ export function createCache(options: CacheOptions): Cache {
           headers.set("if-none-match", entry.etag);
         }
         // Keeps the caller's init (credentials, redirect, ...) but is detached
-        // from their signal: this outlives their request.
-        const request = new Request(state.ctx.request, { headers, signal });
+        // from their signal: this outlives their request. The cache mode is
+        // forced to "no-store": a caller's "force-cache" or "only-if-cached"
+        // would be answered from the HTTP cache and never revalidate (Fetch,
+        // HTTP-network-or-cache fetch step 16 does the same for a "default"
+        // request that carries If-None-Match).
+        const request = new Request(state.ctx.request, {
+          headers,
+          signal,
+          cache: "no-store",
+        });
         const fresh: State = {
           ...state,
           validated: entry.etag !== undefined,
