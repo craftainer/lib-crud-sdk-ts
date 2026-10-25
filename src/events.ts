@@ -255,11 +255,15 @@ class Hub {
         if (done) {
           return;
         }
-        arm(); // any byte, keep-alive comments included, proves the stream is alive
         parser.feed(decoder.decode(value, { stream: true }));
+        // Any byte, keep-alive comments included, proves the stream is alive.
+        // Handlers may be slow and nothing is read meanwhile, so the timer is
+        // paused while they run and restarts once they are done.
+        clearTimeout(timer);
         for (const message of pending.splice(0)) {
           await this.handle(message);
         }
+        arm();
       }
     } finally {
       clearTimeout(timer);
