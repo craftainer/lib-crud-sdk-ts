@@ -62,6 +62,9 @@ const CALLS: Record<string, (r: ResourceClient, a: Args) => unknown> = {
   eventsUrl: (r) => r.eventsUrl(),
 };
 
+/** Calls typed to return a JSON array. */
+const ARRAY_CALLS = new Set(["list", "filters", "revisions"]);
+
 describe("URL parity with the Python SDK", () => {
   it("has the table", () => {
     expect(table.cases.length).toBeGreaterThan(150);
@@ -72,7 +75,9 @@ describe("URL parity with the Python SDK", () => {
 
   it.each(table.cases)("$name", async (c) => {
     const { client, seen } = clientFor(fixture(c.manifest), () =>
-      c.call === "delete" ? new Response(null, { status: 204 }) : json({}),
+      c.call === "delete"
+        ? new Response(null, { status: 204 })
+        : json(ARRAY_CALLS.has(c.call) ? [] : {}),
     );
     const resource = await client.resource(c.resource, c.apiVersion);
     const before = seen.length;

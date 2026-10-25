@@ -124,7 +124,7 @@ export class RateLimited extends ProblemError {
       return undefined;
     }
     const seconds = Number(raw);
-    return Number.isNaN(seconds) ? undefined : seconds;
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
   }
 }
 

@@ -598,6 +598,25 @@ describe("write-through", () => {
     expect(s.store.get(LIST)).toBeDefined();
   });
 
+  it("a write answered 404 or 410 evicts that record's entries; other refusals keep them", async () => {
+    for (const status of [404, 410]) {
+      const s = setup();
+      s.net.push(
+        json({ id: 5 }, { headers: { etag: ETAG1 } }),
+        json([], { headers: { etag: ETAG1 } }),
+        json({ detail: "gone" }, { status }),
+      );
+      await s.call(ctxFor("record", { recordId: 5, query: "?id=5" }));
+      await s.call(ctxFor("revisions", { recordId: 5 }));
+      expect(s.store.get(REC5)).toBeDefined();
+      await s.call(
+        ctxFor("update", { method: "PATCH", recordId: 5, query: "?id=5" }),
+      );
+      expect(s.store.get(REC5)).toBeUndefined();
+      expect(s.store.get("v1/heroes/revisions/5/_/anon/")).toBeUndefined();
+    }
+  });
+
   it("a write that throws or gets a 5xx may have been applied: it clears what a success would", async () => {
     const outcomes: Array<[string, () => Response | Promise<Response>]> = [
       [

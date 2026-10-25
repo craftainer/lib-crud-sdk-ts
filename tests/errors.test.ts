@@ -149,6 +149,10 @@ describe("problemFromResponse", () => {
     expect(await retry()).toBeUndefined();
     expect(await retry("Wed, 21 Oct 2026 07:28:00 GMT")).toBeUndefined();
     expect(await retry(" ")).toBeUndefined();
+    expect(await retry("0")).toBe(0);
+    for (const bad of ["Infinity", "-Infinity", "-1", "-0.5", "1e999"]) {
+      expect(await retry(bad)).toBeUndefined();
+    }
   });
 
   it("leaves the response body readable", async () => {

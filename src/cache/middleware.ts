@@ -522,6 +522,13 @@ export function createCache(options: CacheOptions): Cache {
         ? []
         : clears([recordPrefix(resource, recordId)]);
     }
+    if ((status === 404 || status === 410) && recordId !== undefined) {
+      // The record is gone (or never was): drop what reads cached for it.
+      return clears([
+        recordPrefix(resource, recordId),
+        revisionsPrefix(resource, recordId),
+      ]);
+    }
     const ok = status !== undefined && status >= 200 && status < 300;
     if (!ok && status !== undefined && status < 500) {
       return []; // refused: nothing changed
