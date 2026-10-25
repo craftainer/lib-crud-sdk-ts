@@ -138,3 +138,38 @@ describe("buildQuery", () => {
     );
   });
 });
+
+describe("buildQuery onlyArchived", () => {
+  it("emits only_archived=true after include_archived, never false", () => {
+    expect(buildQuery(FIELDS, { onlyArchived: true })).toBe(
+      "only_archived=true",
+    );
+    expect(buildQuery(FIELDS, { onlyArchived: false })).toBe("");
+    expect(buildQuery(FIELDS, { onlyArchived: undefined })).toBe("");
+    expect(
+      buildQuery(FIELDS, {
+        filters: { n: 1 },
+        sort: "n",
+        skip: 2,
+        limit: 5,
+        includeArchived: true,
+        onlyArchived: true,
+        includeUnpublished: false,
+      }),
+    ).toBe(
+      "n=1&sort=n&skip=2&limit=5&include_archived=true&only_archived=true&include_unpublished=false",
+    );
+  });
+
+  it("allows includeArchived true or absent, rejects false before building", () => {
+    expect(
+      buildQuery(FIELDS, { onlyArchived: true, includeArchived: true }),
+    ).toBe("include_archived=true&only_archived=true");
+    expect(() =>
+      buildQuery(FIELDS, { onlyArchived: true, includeArchived: false }),
+    ).toThrow(InvalidQueryError);
+    expect(
+      buildQuery(FIELDS, { onlyArchived: false, includeArchived: false }),
+    ).toBe("include_archived=false");
+  });
+});

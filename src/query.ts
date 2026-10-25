@@ -31,6 +31,12 @@ export interface QueryParams {
   readonly limitParam?: string | undefined;
   readonly sortParam?: string | undefined;
   readonly includeArchived?: boolean | undefined;
+  /**
+   * Only rows with `archived_at` set (list only; implies `include_archived`).
+   * Emitted only when `true`; combining `true` with `includeArchived: false`
+   * throws `InvalidQueryError`, as the server answers 422.
+   */
+  readonly onlyArchived?: boolean | undefined;
   readonly includeUnpublished?: boolean | undefined;
 }
 
@@ -234,15 +240,21 @@ function intArg(name: string, value: unknown, minimum: number): string {
 /**
  * The query string (no leading `?`) for a list, get or bulk call. Order of
  * parameters: `id`, filters sorted by (field, operator), sort, skip, limit,
- * `include_archived`, `include_unpublished`. The sort/skip/limit names are
+ * `include_archived`, `only_archived`, `include_unpublished`. The sort/skip/limit names are
  * `sortParam`/`skipParam`/`limitParam` (the manifest's `pagination`); the
  * `id` parameter is always `id`. Flags are emitted whenever they are not
- * `undefined`.
+ * `undefined`, except `only_archived`, which is emitted only when `true`
+ * (absent means false; it is a reserved key, not a filter).
  */
 export function buildQuery(
   fields: readonly QueryField[],
   params: QueryParams = {},
 ): string {
+  if (params.onlyArchived === true && params.includeArchived === false) {
+    throw new InvalidQueryError(
+      "onlyArchived cannot be combined with includeArchived: false",
+    );
+  }
   const byName = new Map(fields.map((f) => [f.name, f]));
   const parts: string[] = [];
   if (params.recordId !== undefined) {
@@ -272,6 +284,9 @@ export function buildQuery(
   }
   if (params.includeArchived !== undefined) {
     parts.push(`include_archived=${params.includeArchived}`);
+  }
+  if (params.onlyArchived === true) {
+    parts.push("only_archived=true");
   }
   if (params.includeUnpublished !== undefined) {
     parts.push(`include_unpublished=${params.includeUnpublished}`);

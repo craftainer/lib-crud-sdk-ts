@@ -65,7 +65,18 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   order `id`, filters sorted by (field, operator), sort, skip, limit,
   `include_archived`, `include_unpublished`; everything but `A-Za-z0-9-._~`
   percent-encoded; datetimes are `Date`s sent as UTC with milliseconds
-  trimmed; `date` fields take `YYYY-MM-DD` strings.
+  trimmed; `date` fields take `YYYY-MM-DD` strings. `only_archived` is
+  emitted right after `include_archived`, and only when `true`.
+- **Archived rows.** `list` and `iterAll` take `includeArchived` and
+  `onlyArchived`. `onlyArchived: true` returns only rows with `archived_at`
+  set (the server's reserved `only_archived` list parameter; it implies
+  `include_archived` and combines with filters, sort and paging). It is not
+  sent when `false` or absent. Combined with `includeArchived: false` it
+  rejects with `InvalidQueryError` before any request (the server would
+  answer `422`). It is a list option only (not on `stats`, writes, `restore`
+  or `get`); a non-archivable resource ignores it. The wire query is part of
+  the HTTP cache key, and in the TanStack layer put it in the list query (`listOptions(ns, "heroes", api, { onlyArchived: true })`), so
+  archived-only and normal lists never share a cache entry.
 - **Errors.** `ProblemError` (RFC 9457) with subclasses `BadRequest`,
   `Unauthorized`, `Forbidden`, `NotFound`, `PreconditionFailed`,
   `ValidationFailed` (`errors`), `Locked`, `RateLimited` (`retryAfter`),

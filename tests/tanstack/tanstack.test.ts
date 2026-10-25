@@ -114,6 +114,45 @@ describe("crudKeys", () => {
     expect(crudKeys.manifest(ns)).toEqual(["crud", "c1", "_manifest", "s1"]);
   });
 
+  it("keeps archived-only and normal lists apart", async () => {
+    const queryClient = new QueryClient();
+    const api = { list: vi.fn(async () => [{ id: 1, name: "a" }]) };
+    const normal = listOptions<Hero>(ns, "heroes", api, { limit: 5 });
+    const archived = listOptions<Hero>(ns, "heroes", api, {
+      limit: 5,
+      onlyArchived: true,
+    });
+    expect(archived.queryKey).toEqual([
+      ...crudKeys.lists(ns, "heroes"),
+      { limit: 5, onlyArchived: true },
+    ]);
+    queryClient.setQueryData(normal.queryKey, [{ id: 2, name: "b" }]);
+    queryClient.setQueryData(archived.queryKey, [{ id: 3, name: "c" }]);
+    expect(queryClient.getQueryData(normal.queryKey)).toEqual([
+      { id: 2, name: "b" },
+    ]);
+    expect(queryClient.getQueryData(archived.queryKey)).toEqual([
+      { id: 3, name: "c" },
+    ]);
+    await archived.queryFn({ signal });
+    expect(api.list).toHaveBeenCalledWith(
+      { limit: 5, onlyArchived: true },
+      { signal },
+    );
+    const paged = infiniteListOptions<Hero>(ns, "heroes", api, {
+      onlyArchived: true,
+    });
+    expect(paged.queryKey).not.toEqual(
+      infiniteListOptions<Hero>(ns, "heroes", api, {}).queryKey,
+    );
+    await paged.queryFn({ signal, pageParam: 0 });
+    expect(api.list).toHaveBeenLastCalledWith(
+      { onlyArchived: true, skip: 0, limit: 100 },
+      { signal },
+    );
+    queryClient.clear();
+  });
+
   it("separates clients and scopes sharing one QueryClient", () => {
     const queryClient = new QueryClient();
     const keys = [
