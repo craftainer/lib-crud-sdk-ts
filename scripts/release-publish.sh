@@ -29,8 +29,6 @@ if [[ -z ${NPM_PUBLISH:-} ]]; then
     exit 0
 fi
 
-err=$(mktemp)
-on_exit "rm -f '$err'"
 tarball=$(find_tarball)
 # Before any stage or publish: a mismatch would only fail later, at npm.
 check_repository "$tarball"
@@ -46,15 +44,13 @@ echo "Publishing $name@$version under dist-tag '$tag'."
 # npm rejects. `npm view name@version version` prints nothing for a version
 # that is not published (or is only staged), and E404 means the package is
 # unknown; any other lookup failure (network, auth) stops here rather than
-# guessing. A staged tarball cannot be seen here; approve or discard it with
-# `npm stage` before re-running.
-if ! published=$(npm view "$name@$version" version 2>"$err"); then
-    if ! grep -q E404 "$err"; then
-        cat "$err" >&2
-        exit 1
-    fi
-    published=
-fi
+# guessing (see npm_view_field). A staged tarball cannot be seen here, and
+# cannot be detected at all under the auth modes used: `npm stage list`
+# cannot use OIDC tokens (it needs interactive authentication), and a
+# stage-only token is documented to stage, deprecate and move dist-tags only.
+# Re-running after a staged, still-unapproved version would stage it again:
+# approve or reject the existing stage with `npm stage` first.
+published=$(npm_view_field "$name@$version" version) || exit 1
 if [[ -n $published ]]; then
     echo "$name@$version is already on the registry -- nothing to publish."
     exit 0
@@ -75,6 +71,8 @@ if [[ -n ${NPM_TOKEN:-} ]]; then
     npm stage publish "$tarball" "${args[@]}"
     echo "Staged, NOT yet public. A maintainer must approve it with 2FA:"
     echo "  npm stage list && npm stage approve <stage-id>   (or on npmjs.com)"
+    echo "Do NOT re-run publish-packages for this version before then: a re-run cannot see the stage and would stage a duplicate."
+    echo "Re-run only verify-published after approving."
 else
     echo "NPM_TOKEN empty -- publishing $(basename "$tarball") with OIDC trusted publishing."
     npm publish "$tarball" --provenance --access public --tag "$tag"

@@ -9,9 +9,10 @@
 # `dist/` (the tarball `build` produced names the expected package and
 # version).
 #
-# Reads: NPM_PUBLISH, and RELEASE_CHECK_ATTEMPTS / RELEASE_CHECK_DELAY
-# (retry tuning for registry propagation, defaults 3 and 5 seconds,
-# doubling).
+# Reads: NPM_PUBLISH, and RELEASE_CHECK_ATTEMPTS / RELEASE_CHECK_DELAY /
+# RELEASE_CHECK_MAX_DELAY (retry tuning for registry propagation, defaults
+# 10 attempts, 5 seconds doubling up to 60: about 6 minutes in all, since npm
+# can take minutes to show a version that publish just uploaded).
 #
 # A version that never shows up on the registry fails the script: a release
 # whose package did not appear must not pass verification. That includes a
@@ -39,28 +40,24 @@ name=$(tarball_field "$tarball" name)
 version=$(tarball_field "$tarball" version)
 
 echo "== registry: $name@$version"
-attempts=${RELEASE_CHECK_ATTEMPTS:-3}
+attempts=${RELEASE_CHECK_ATTEMPTS:-10}
 delay=${RELEASE_CHECK_DELAY:-5}
+max_delay=${RELEASE_CHECK_MAX_DELAY:-60}
 for ((i = 1; i <= attempts; i++)); do
-    # `npm view name@version version` exits 0 with empty output when the
-    # package exists but that version does not (still propagating, or staged
-    # and unapproved), and exits 1 with E404 when the package is unknown.
-    if found=$(npm view "$name@$version" version 2>"$tmp/err"); then
-        if [[ -n $found ]]; then
-            mkdir "$tmp/published"
-            install_into "$tmp/published" "$name@$version"
-            check_import "$tmp/published" "$name" "$version"
-            exit 0
-        fi
-    # Anything but "not found" (network, auth) is a real failure.
-    elif ! grep -q E404 "$tmp/err"; then
-        cat "$tmp/err" >&2
-        exit 1
+    # Empty = not found: the package exists but that version does not (still
+    # propagating, or staged and unapproved), or the package is unknown
+    # (E404). Anything else (network, auth) is a real failure.
+    found=$(npm_view_field "$name@$version" version) || exit 1
+    if [[ -n $found ]]; then
+        mkdir "$tmp/published"
+        install_into "$tmp/published" "$name@$version"
+        check_import "$tmp/published" "$name" "$version"
+        exit 0
     fi
     if ((i < attempts)); then
         echo "attempt $i/$attempts: not found; retrying in ${delay}s (registry propagation)"
         sleep "$delay"
-        delay=$((delay * 2))
+        delay=$((delay * 2 > max_delay ? max_delay : delay * 2))
     fi
 done
 echo "ERROR: $name@$version is not on the registry after $attempts attempts." >&2
