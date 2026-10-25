@@ -436,14 +436,22 @@ export function invalidateRecord(
 export interface CreateMutationOptions<T, C> {
   readonly mutationKey: readonly ["crud", string, string, string, "create"];
   readonly mutationFn: (body: C) => Promise<T>;
-  readonly onSuccess: () => Promise<void>;
+  /** Invalidates lists, stats and predict, whether the write succeeded or failed. */
+  readonly onSettled: (data: T | undefined, error: unknown) => Promise<void>;
 }
 
 export interface UpdateMutationOptions<T, P> {
   readonly mutationKey: readonly ["crud", string, string, string, "update"];
   readonly mutationFn: (variables: UpdateVariables<P>) => Promise<T>;
+  /** Sets the caller's record query from the PATCH response. */
   readonly onSuccess: (
     record: T,
+    variables: UpdateVariables<P>,
+  ) => Promise<void>;
+  /** Invalidates collections, other scopes' records and revisions, whether the write succeeded or failed. */
+  readonly onSettled: (
+    data: T | undefined,
+    error: unknown,
     variables: UpdateVariables<P>,
   ) => Promise<void>;
 }
@@ -451,10 +459,21 @@ export interface UpdateMutationOptions<T, P> {
 export interface DeleteMutationOptions {
   readonly mutationKey: readonly ["crud", string, string, string, "delete"];
   readonly mutationFn: (id: number) => Promise<unknown>;
+  /** Drops the deleted record's query. */
   readonly onSuccess: (result: unknown, id: number) => Promise<void>;
+  /** Invalidates collections and the record's revisions, whether the write succeeded or failed. */
+  readonly onSettled: (
+    data: unknown,
+    error: unknown,
+    id: number,
+  ) => Promise<void>;
 }
 
-/** Create: invalidate lists, stats and predict. */
+/**
+ * Create: `onSettled` invalidates lists, stats and predict after success or
+ * failure (a `5xx` or a dropped connection may have applied the write, so
+ * TanStack's "always refetch after error or success").
+ */
 export function createMutationOptions<T, C>(
   queryClient: Invalidator,
   ns: CrudNamespace,
@@ -464,7 +483,7 @@ export function createMutationOptions<T, C>(
   return {
     mutationKey: ["crud", ns.client, resource, ns.scope, "create"],
     mutationFn: (body: C) => api.create(body),
-    onSuccess: () =>
+    onSettled: () =>
       invalidateCollections(queryClient, { client: ns.client, resource }),
   };
 }
@@ -476,7 +495,12 @@ export interface UpdateVariables<P> {
   readonly ifMatch?: string;
 }
 
-/** Update: `setQueryData` from the PATCH response, invalidate lists, stats, predict and revisions. */
+/**
+ * Update: `onSuccess` sets the record query from the PATCH response;
+ * `onSettled` invalidates lists, stats, predict and revisions after success or
+ * failure. After a failure the caller's own record is invalidated too (it was
+ * not set, and a `412` means it is stale).
+ */
 export function updateMutationOptions<T, P>(
   queryClient: Invalidator,
   ns: CrudNamespace,
@@ -487,34 +511,42 @@ export function updateMutationOptions<T, P>(
     mutationKey: ["crud", ns.client, resource, ns.scope, "update"],
     mutationFn: ({ id, patch, ifMatch }: UpdateVariables<P>) =>
       api.update(id, patch, ifMatch === undefined ? {} : { ifMatch }),
-    onSuccess: async (record: T, { id }: UpdateVariables<P>) => {
+    onSuccess: (record: T, { id }: UpdateVariables<P>) => {
       queryClient.setQueryData(crudKeys.record(ns, resource, id), record);
+      return Promise.resolve();
+    },
+    onSettled: async (
+      _data: T | undefined,
+      error: unknown,
+      { id }: UpdateVariables<P>,
+    ) => {
+      const target = { client: ns.client, resource };
       await Promise.all([
-        invalidateCollections(queryClient, { client: ns.client, resource }),
-        // The caller's own record was just set; other scopes' are stale.
+        invalidateCollections(queryClient, target),
+        // On success the caller's own record was just set; other scopes' are stale.
         queryClient.invalidateQueries(
           crudKeys.filter({
-            client: ns.client,
-            resource,
-            exceptScope: ns.scope,
+            ...target,
+            ...(error === null || error === undefined
+              ? { exceptScope: ns.scope }
+              : {}),
             kinds: ["record"],
             id,
           }),
         ),
         queryClient.invalidateQueries(
-          crudKeys.filter({
-            client: ns.client,
-            resource,
-            kinds: ["revisions"],
-            id,
-          }),
+          crudKeys.filter({ ...target, kinds: ["revisions"], id }),
         ),
       ]);
     },
   };
 }
 
-/** Delete: drop the record query, invalidate lists, stats, predict and revisions. */
+/**
+ * Delete: `onSuccess` drops the record query; `onSettled` invalidates lists,
+ * stats, predict and the record's revisions after success or failure. After a
+ * failure the record query is invalidated too (the row still exists).
+ */
 export function deleteMutationOptions(
   queryClient: Invalidator,
   ns: CrudNamespace,
@@ -524,7 +556,7 @@ export function deleteMutationOptions(
   return {
     mutationKey: ["crud", ns.client, resource, ns.scope, "delete"],
     mutationFn: (id: number) => api.delete(id),
-    onSuccess: async (_result: unknown, id: number) => {
+    onSuccess: (_result: unknown, id: number) => {
       queryClient.removeQueries(
         crudKeys.filter({
           client: ns.client,
@@ -533,16 +565,14 @@ export function deleteMutationOptions(
           id,
         }),
       );
+      return Promise.resolve();
+    },
+    onSettled: async (_data: unknown, _error: unknown, id: number) => {
+      const target = { client: ns.client, resource };
       await Promise.all([
-        invalidateCollections(queryClient, { client: ns.client, resource }),
-        queryClient.invalidateQueries(
-          crudKeys.filter({
-            client: ns.client,
-            resource,
-            kinds: ["revisions"],
-            id,
-          }),
-        ),
+        invalidateCollections(queryClient, target),
+        // After a success the record query is already gone; this matches revisions only.
+        invalidateRecord(queryClient, target, id),
       ]);
     },
   };

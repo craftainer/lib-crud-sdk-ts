@@ -1,4 +1,8 @@
-import { InfiniteQueryObserver, QueryClient } from "@tanstack/query-core";
+import {
+  InfiniteQueryObserver,
+  MutationObserver,
+  QueryClient,
+} from "@tanstack/query-core";
 import type { DataTag } from "@tanstack/query-core";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
@@ -449,7 +453,8 @@ describe("mutation option factories", () => {
       id: 9,
       name: "n",
     });
-    await options.onSuccess();
+    expect("onSuccess" in options).toBe(false); // the invalidation is in onSettled
+    await options.onSettled({ id: 9, name: "n" }, null);
     expect(stale(queryClient, crudKeys.list(ns, "heroes", { a: 1 }))).toBe(
       true,
     );
@@ -499,6 +504,10 @@ describe("mutation option factories", () => {
       id: 5,
       name: "new",
     });
+    expect(stale(queryClient, crudKeys.list(ns, "heroes", { a: 1 }))).toBe(
+      false,
+    ); // onSuccess only sets the record
+    await options.onSettled(record, null, { id: 5, patch: {} });
     expect(stale(queryClient, crudKeys.record(ns, "heroes", 5))).toBe(false);
     expect(stale(queryClient, crudKeys.list(ns, "heroes", { a: 1 }))).toBe(
       true,
@@ -528,6 +537,10 @@ describe("mutation option factories", () => {
     await options.mutationFn(5);
     expect(api.delete).toHaveBeenCalledWith(5);
     await options.onSuccess(undefined, 5);
+    expect(stale(queryClient, crudKeys.list(ns, "heroes", { a: 1 }))).toBe(
+      false,
+    ); // onSuccess only drops the record
+    await options.onSettled(undefined, null, 5);
     expect(
       queryClient.getQueryData(crudKeys.record(ns, "heroes", 5)),
     ).toBeUndefined();
@@ -540,6 +553,135 @@ describe("mutation option factories", () => {
     expect(stale(queryClient, crudKeys.revisions(ns, "heroes", 5))).toBe(true);
     queryClient.clear();
   });
+});
+
+describe("mutation option factories settle on any outcome", () => {
+  const seed = () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(crudKeys.list(ns, "heroes"), [1]);
+    queryClient.setQueryData(crudKeys.stats(ns, "heroes"), 1);
+    queryClient.setQueryData(crudKeys.record(ns, "heroes", 5), { id: 5 });
+    queryClient.setQueryData(crudKeys.record(other, "heroes", 5), { id: 5 });
+    queryClient.setQueryData(crudKeys.revisions(ns, "heroes", 5), []);
+    return queryClient;
+  };
+  const stale = (queryClient: QueryClient, key: readonly unknown[]) =>
+    queryClient.getQueryState(key)?.isInvalidated;
+  const collections = (queryClient: QueryClient) => [
+    stale(queryClient, crudKeys.list(ns, "heroes")),
+    stale(queryClient, crudKeys.stats(ns, "heroes")),
+  ];
+  const failures = {
+    "a 4xx": new Error("412"),
+    "a 5xx": Object.assign(new Error("503"), { status: 503 }),
+    "a thrown transport error": new TypeError("fetch failed"),
+  };
+
+  it.each(Object.entries(failures))(
+    "create invalidates collections after %s",
+    async (_name, failure) => {
+      const queryClient = seed();
+      const options = createMutationOptions(queryClient, ns, "heroes", {
+        create: () => Promise.reject(failure),
+      });
+      await new MutationObserver(queryClient, options)
+        .mutate({})
+        .catch(() => undefined);
+      expect(collections(queryClient)).toEqual([true, true]);
+      queryClient.clear();
+    },
+  );
+
+  it("create invalidates collections once on success", async () => {
+    const queryClient = seed();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = createMutationOptions(queryClient, ns, "heroes", {
+      create: () => Promise.resolve({ id: 1 }),
+    });
+    await new MutationObserver(queryClient, options).mutate({});
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(collections(queryClient)).toEqual([true, true]);
+    queryClient.clear();
+  });
+
+  it("update invalidates once on success and keeps the caller's own record fresh", async () => {
+    const queryClient = seed();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const options = updateMutationOptions(queryClient, ns, "heroes", {
+      update: (id: number) => Promise.resolve({ id, name: "new" }),
+    });
+    await new MutationObserver(queryClient, options).mutate({
+      id: 5,
+      patch: {},
+    });
+    expect(invalidate).toHaveBeenCalledTimes(3); // collections (once), other scopes' records, revisions
+    expect(collections(queryClient)).toEqual([true, true]);
+    expect(stale(queryClient, crudKeys.record(ns, "heroes", 5))).toBe(false);
+    expect(stale(queryClient, crudKeys.record(other, "heroes", 5))).toBe(true);
+    expect(stale(queryClient, crudKeys.revisions(ns, "heroes", 5))).toBe(true);
+    queryClient.clear();
+  });
+
+  it.each(Object.entries(failures))(
+    "update invalidates everything of the record after %s, and sets nothing",
+    async (_name, failure) => {
+      const queryClient = seed();
+      const options = updateMutationOptions(queryClient, ns, "heroes", {
+        update: () => Promise.reject(failure),
+      });
+      await new MutationObserver(queryClient, options)
+        .mutate({ id: 5, patch: {} })
+        .catch(() => undefined);
+      expect(
+        queryClient.getQueryData(crudKeys.record(ns, "heroes", 5)),
+      ).toEqual({ id: 5 });
+      expect(collections(queryClient)).toEqual([true, true]);
+      expect(stale(queryClient, crudKeys.record(ns, "heroes", 5))).toBe(true);
+      expect(stale(queryClient, crudKeys.record(other, "heroes", 5))).toBe(
+        true,
+      );
+      expect(stale(queryClient, crudKeys.revisions(ns, "heroes", 5))).toBe(
+        true,
+      );
+      queryClient.clear();
+    },
+  );
+
+  it("delete removes the record and invalidates the rest on success", async () => {
+    const queryClient = seed();
+    const options = deleteMutationOptions(queryClient, ns, "heroes", {
+      delete: () => Promise.resolve(undefined),
+    });
+    await new MutationObserver(queryClient, options).mutate(5);
+    expect(
+      queryClient.getQueryData(crudKeys.record(ns, "heroes", 5)),
+    ).toBeUndefined();
+    expect(collections(queryClient)).toEqual([true, true]);
+    expect(stale(queryClient, crudKeys.revisions(ns, "heroes", 5))).toBe(true);
+    queryClient.clear();
+  });
+
+  it.each(Object.entries(failures))(
+    "delete keeps the record but invalidates it and the collections after %s",
+    async (_name, failure) => {
+      const queryClient = seed();
+      const options = deleteMutationOptions(queryClient, ns, "heroes", {
+        delete: () => Promise.reject(failure),
+      });
+      await new MutationObserver(queryClient, options)
+        .mutate(5)
+        .catch(() => undefined);
+      expect(
+        queryClient.getQueryData(crudKeys.record(ns, "heroes", 5)),
+      ).toEqual({ id: 5 });
+      expect(collections(queryClient)).toEqual([true, true]);
+      expect(stale(queryClient, crudKeys.record(ns, "heroes", 5))).toBe(true);
+      expect(stale(queryClient, crudKeys.revisions(ns, "heroes", 5))).toBe(
+        true,
+      );
+      queryClient.clear();
+    },
+  );
 });
 
 describe("bridgeEvents", () => {
