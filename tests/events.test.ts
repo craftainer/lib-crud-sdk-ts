@@ -634,3 +634,179 @@ describe("subscribeEvents", () => {
     await vi.waitFor(() => expect(net.conns).toHaveLength(2));
   });
 });
+
+describe("connection identity", () => {
+  it("passes one connection object to the connect reset and to onStatus(true)", async () => {
+    const net = sseFetch();
+    const seen: unknown[] = [];
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      onEvent: () => undefined,
+      onReset: (connection) => {
+        seen.push(["reset", connection]);
+      },
+      onStatus: (up, connection) => {
+        seen.push([up ? "up" : "down", connection]);
+      },
+    });
+    await vi.waitFor(() => expect(net.conns).toHaveLength(1));
+    net.conns[0]!.push(handshake("a"));
+    net.conns[0]!.push(frame(1, record("update", 1, { record_id: null })));
+    await vi.waitFor(() => expect(seen).toHaveLength(3));
+    const [connect, up, plain] = seen as [unknown[], unknown[], unknown[]];
+    expect(connect[0]).toBe("reset");
+    expect(typeof connect[1]).toBe("object");
+    expect(up[1]).toBe(connect[1]); // the same identity
+    expect(plain).toEqual(["reset", undefined]); // not a connect: no identity
+    stop();
+    await vi.waitFor(() => expect(net.conns[0]!.signal?.aborted).toBe(true));
+  });
+
+  it("gives a late joiner the live connection, and a reconnect a new one", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const first = collect();
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      random: () => 0,
+      ...first.handlers,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const resets: unknown[] = [];
+    net.conns[0]!.push(handshake("a"));
+    await vi.advanceTimersByTimeAsync(0);
+    const joins: unknown[] = [];
+    const stopLate = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      onEvent: () => undefined,
+      onReset: (connection) => {
+        resets.push(connection);
+      },
+      onStatus: (up, connection) => {
+        if (up) {
+          joins.push(connection);
+        }
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    // The late joiner is told the stream is up, with an identity, and no reset.
+    expect(resets).toEqual([]);
+    expect(joins).toHaveLength(1);
+    expect(typeof joins[0]).toBe("object");
+    net.conns[0]!.end();
+    await vi.advanceTimersByTimeAsync(1000);
+    net.conns[1]!.push(handshake("b"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resets).toHaveLength(1);
+    expect(joins).toHaveLength(2);
+    expect(joins[1]).toBe(resets[0]);
+    expect(joins[1]).not.toBe(joins[0]);
+    stopLate();
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("hands a joiner that arrives during the reset fan-out the same connection, unreset", async () => {
+    const net = sseFetch();
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const firstReset: unknown[] = [];
+    const lateReset: unknown[] = [];
+    const lateUp: unknown[] = [];
+    let stopLate: (() => void) | undefined;
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      onEvent: () => undefined,
+      onReset: async (connection) => {
+        firstReset.push(connection);
+        // Mid fan-out: the hub is still not connected.
+        stopLate = subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: config,
+          onEvent: () => undefined,
+          onReset: (c) => {
+            lateReset.push(c);
+          },
+          onStatus: (up, c) => {
+            if (up) {
+              lateUp.push(c);
+            }
+          },
+        });
+        await slow;
+      },
+    });
+    await vi.waitFor(() => expect(net.conns).toHaveLength(1));
+    net.conns[0]!.push(handshake("a"));
+    await vi.waitFor(() => expect(firstReset).toHaveLength(1));
+    expect(lateUp).toEqual([]); // not connected yet
+    release();
+    await vi.waitFor(() => expect(lateUp).toHaveLength(1));
+    expect(lateReset).toEqual([]);
+    expect(lateUp[0]).toBe(firstReset[0]);
+    stopLate?.();
+    stop();
+  });
+});
+
+describe("a repeated handshake on a live stream", () => {
+  it("tells a subscriber that joined during its reset fan-out about the new connection", async () => {
+    const net = sseFetch();
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let hold = false;
+    const firstResets: unknown[] = [];
+    const lateUps: unknown[] = [];
+    let stopLate: (() => void) | undefined;
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      onEvent: () => undefined,
+      onReset: async (connection) => {
+        firstResets.push(connection);
+        if (hold) {
+          stopLate = subscribeEvents({
+            fetch: net.fn,
+            url: URL_,
+            events: config,
+            onEvent: () => undefined,
+            onStatus: (up, c) => {
+              if (up) {
+                lateUps.push(c);
+              }
+            },
+          });
+          await slow;
+        }
+      },
+    });
+    await vi.waitFor(() => expect(net.conns).toHaveLength(1));
+    net.conns[0]!.push(handshake("a"));
+    await vi.waitFor(() => expect(firstResets).toHaveLength(1));
+    hold = true;
+    net.conns[0]!.push(handshake("a", 1)); // a second handshake, same stream
+    await vi.waitFor(() => expect(firstResets).toHaveLength(2));
+    // Joined on a connected hub: told about the old connection first.
+    await vi.waitFor(() => expect(lateUps).toHaveLength(1));
+    expect(lateUps[0]).toBe(firstResets[0]);
+    release();
+    await vi.waitFor(() => expect(lateUps).toHaveLength(2));
+    expect(lateUps[1]).toBe(firstResets[1]);
+    stopLate?.();
+    stop();
+  });
+});

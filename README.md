@@ -53,6 +53,14 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   `/.well-known/api-catalog` (the `describedby` link with the manifest
   profile), or from `manifestUrl`. Manifest types keep the wire member names
   (`skip_param`, `max_age`, ...) and ignore unknown members.
+- **Same origin.** The client sends the token to every URL it builds, so a
+  manifest `base_path`, `paths.*` or `events.path` that resolves to another
+  origin than `baseUrl`'s (an absolute URL or a protocol-relative `//host`)
+  is refused with a `ManifestError`. For a split-origin deployment, list the
+  extra origins: `createClient({ baseUrl, allowedOrigins: ["https://files.example"] })`
+  (exact origins: scheme, host and port; an entry that is not an http(s)
+  origin throws at `createClient`). The same rule already applies to the
+  api-catalog's manifest link.
 - **Operations** (each gated on the manifest's capabilities and `paths`,
   else `CapabilityError`): `list`, `iterAll`, `get`, `create`, `update`,
   `updateMany`, `delete`, `deleteMany`, `restore({ id } | { filters })`,
@@ -102,7 +110,11 @@ crud-sdk-codegen --manifest ./manifest.json --out src/crud-types.ts
 Writes `<Name><Version>Read|Create|Update` (and `Draft`) interfaces per
 resource from the manifest's JSON Schemas. `--manifest` is a manifest URL, a
 server origin (discovers through the api-catalog) or a file; the optional
-peer `json-schema-to-typescript` must be installed.
+peer `json-schema-to-typescript` must be installed. The header names the
+source without credentials, query or fragment. Two resources whose names
+map to the same type name (`hero-x` and `hero_x`, same version), or a name
+that is not a valid identifier (a leading digit), fail with a `CrudError`
+naming them.
 
 ## Caching / TanStack
 
@@ -117,6 +129,9 @@ objects, snake_case members).
 - Every read revalidates (`If-None-Match`, `304` rebuilt from the store).
   `max_age`/`stale_while_revalidate` freshness applies only while the
   resource's SSE stream is connected, never with `cache.revalidate_only`.
+  Every connection clears the resource once per cache, including for a
+  subscription that joins an already connected stream, which clears before
+  its gate opens.
 - Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
 events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   never apply snapshots. `subscribeEvents` is the lower-level entry.

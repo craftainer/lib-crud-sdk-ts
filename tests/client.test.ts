@@ -526,3 +526,154 @@ describe("errors", () => {
     expect(stub).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("manifest URLs stay on baseUrl's origin", () => {
+  const withHeroes = (edit: (r: any) => void): unknown => {
+    const doc = structuredClone(admin) as any;
+    edit(doc.resources[1]);
+    return doc;
+  };
+  const files = "https://files.test";
+
+  it("refuses base_path, paths.* and events.path on another origin, absolute or protocol-relative", async () => {
+    const cases: Array<[string, (r: any) => void, (r: any) => unknown]> = [
+      [
+        "base_path (absolute)",
+        (r) => {
+          r.base_path = `${files}/heroes`;
+        },
+        (h) => h.list(),
+      ],
+      [
+        "base_path (protocol-relative)",
+        (r) => {
+          r.base_path = "//files.test/heroes";
+        },
+        (h) => h.get(1),
+      ],
+      [
+        "base_path (backslashes)",
+        (r) => {
+          r.base_path = "\\\\files.test\\heroes";
+        },
+        (h) => h.create({}),
+      ],
+      [
+        "paths.stats",
+        (r) => {
+          r.paths.stats = `${files}/stats`;
+        },
+        (h) => h.stats(),
+      ],
+      [
+        "paths.restore (protocol-relative)",
+        (r) => {
+          r.paths.restore = "//files.test/restore";
+        },
+        (h) => h.restore({ id: 1 }),
+      ],
+      [
+        "events.path",
+        (r) => {
+          r.capabilities.events.path = "//files.test/events";
+        },
+        (h) => h.eventsUrl(),
+      ],
+      [
+        "another scheme",
+        (r) => {
+          r.base_path = "http://api.test/heroes";
+        },
+        (h) => h.list(),
+      ],
+      [
+        "another port",
+        (r) => {
+          r.base_path = "https://api.test:8443/heroes";
+        },
+        (h) => h.list(),
+      ],
+    ];
+    for (const [label, edit, call] of cases) {
+      const { client, seen } = clientFor(withHeroes(edit));
+      const h = await client.resource("heroes");
+      await expect(
+        Promise.resolve().then(() => call(h)),
+        label,
+      ).rejects.toThrow(ManifestError);
+      expect(seen, label).toHaveLength(1); // only the manifest: no token left
+    }
+  });
+
+  it("names the path and origin, and the way out", async () => {
+    const doc = withHeroes((r) => {
+      r.base_path = "//files.test/heroes";
+    });
+    const { client } = clientFor(doc);
+    const h = await client.resource("heroes");
+    await expect(h.list()).rejects.toThrow(
+      /"\/\/files\.test\/heroes".*https:\/\/files\.test.*token would follow.*allowedOrigins/,
+    );
+  });
+
+  it("accepts a same-origin absolute URL and any path under baseUrl's origin", async () => {
+    const doc = withHeroes((r) => {
+      r.base_path = `${BASE}/x/heroes`;
+      r.paths.stats = "../up/stats";
+    });
+    const { client, seen } = clientFor(doc);
+    const h = await client.resource("heroes");
+    await h.list();
+    await h.stats();
+    expect(seen.slice(1).map((s) => s.url)).toEqual([
+      `${BASE}/x/heroes?skip=0&limit=100`.replace("?skip=0&limit=100", ""),
+      `${BASE}/up/stats`,
+    ]);
+  });
+
+  it("allows an origin listed in allowedOrigins, and only that one", async () => {
+    const doc = withHeroes((r) => {
+      r.base_path = `${files}/heroes`;
+      r.paths.stats = "//other.test/stats";
+      r.capabilities.events.path = `${files}/events`;
+    });
+    const { client, seen } = clientFor(doc, () => json([]), {
+      allowedOrigins: [`${files}/`, "https://unused.test"],
+    });
+    const h = await client.resource("heroes");
+    await h.list();
+    expect(seen.at(-1)!.url.startsWith(`${files}/heroes`)).toBe(true);
+    expect(h.eventsUrl()).toBe(`${files}/events`);
+    await expect(h.stats()).rejects.toThrow(ManifestError);
+  });
+
+  it("matches allowedOrigins exactly: scheme and port count, normalised form does not", async () => {
+    const doc = withHeroes((r) => {
+      r.base_path = "https://files.test:8443/heroes";
+    });
+    const refused = clientFor(doc, () => json([]), {
+      allowedOrigins: [files],
+    });
+    await expect(
+      (await refused.client.resource("heroes")).list(),
+    ).rejects.toThrow(ManifestError);
+    const ok = clientFor(doc, () => json([]), {
+      allowedOrigins: ["HTTPS://Files.test:8443"],
+    });
+    await (await ok.client.resource("heroes")).list();
+    expect(ok.seen.at(-1)!.url).toContain("https://files.test:8443/heroes");
+  });
+
+  it("rejects an allowedOrigins entry that is not an http(s) origin at createClient", () => {
+    for (const bad of [
+      "files.test",
+      "",
+      "ftp://files.test",
+      "data:text/plain,x",
+    ]) {
+      expect(() =>
+        createClient({ baseUrl: BASE, allowedOrigins: [bad] }),
+      ).toThrow(/allowedOrigins/);
+    }
+  });
+});

@@ -23,6 +23,7 @@ export type { CacheKind, KeyParts } from "./keys.ts";
 export { invalidateOnEvents } from "./wire.ts";
 export { getEventHub, subscribeEvents } from "../events.ts";
 export type {
+  EventConnection,
   EventHandlers,
   EventHub,
   EventHubOptions,

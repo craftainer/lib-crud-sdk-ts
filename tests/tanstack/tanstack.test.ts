@@ -647,3 +647,88 @@ describe("bridgeEvents", () => {
     queryClient.clear();
   });
 });
+
+describe("bridgeEvents with a late joiner (ADR 0002)", () => {
+  const target = { client: ns.client, resource: "heroes" };
+  const hubOf = () => {
+    const handlers: EventHandlers[] = [];
+    const hub: EventHub = {
+      subscribe(h) {
+        handlers.push(h);
+        return () => undefined;
+      },
+    };
+    return { hub, handlers };
+  };
+  const listInvalidated = (queryClient: QueryClient) =>
+    queryClient.getQueryState(crudKeys.list(ns, "heroes"))?.isInvalidated ===
+    true;
+  const seed = () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(crudKeys.list(ns, "heroes"), [1]);
+    return queryClient;
+  };
+
+  it("invalidates the resource of a QueryClient that joins a connected hub", async () => {
+    const queryClient = seed();
+    const { hub, handlers } = hubOf();
+    bridgeEvents(queryClient, hub, target);
+    expect(listInvalidated(queryClient)).toBe(false);
+    await handlers[0]!.onStatus?.(true, {}); // the late joiner: up, no reset
+    expect(listInvalidated(queryClient)).toBe(true);
+    queryClient.clear();
+  });
+
+  it("skips a QueryClient already reset on the connection, but not a new connection", async () => {
+    const queryClient = seed();
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    const conn = {};
+    const a = hubOf();
+    bridgeEvents(queryClient, a.hub, target);
+    await a.handlers[0]!.onReset?.(conn);
+    await a.handlers[0]!.onStatus?.(true, conn);
+    const remount = hubOf(); // same QueryClient, same connection
+    bridgeEvents(queryClient, remount.hub, target);
+    await remount.handlers[0]!.onStatus?.(true, conn);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await remount.handlers[0]!.onStatus?.(true, {});
+    expect(spy).toHaveBeenCalledTimes(2);
+    queryClient.clear();
+  });
+
+  it("ignores a status without a live connection", async () => {
+    const queryClient = seed();
+    const { hub, handlers } = hubOf();
+    bridgeEvents(queryClient, hub, target);
+    await handlers[0]!.onStatus?.(false);
+    await handlers[0]!.onStatus?.(true);
+    expect(listInvalidated(queryClient)).toBe(false);
+    queryClient.clear();
+  });
+
+  it("resets each QueryClient and each resource separately, and a plain reset always", async () => {
+    const one = seed();
+    const two = seed();
+    const spyOne = vi.spyOn(one, "invalidateQueries");
+    const spyTwo = vi.spyOn(two, "invalidateQueries");
+    const conn = {};
+    for (const [queryClient, resource] of [
+      [one, "heroes"],
+      [two, "heroes"],
+      [one, "ships"],
+    ] as const) {
+      const { hub, handlers } = hubOf();
+      bridgeEvents(queryClient, hub, { client: ns.client, resource });
+      await handlers[0]!.onStatus?.(true, conn);
+    }
+    expect(spyOne).toHaveBeenCalledTimes(2);
+    expect(spyTwo).toHaveBeenCalledTimes(1);
+    const { hub, handlers } = hubOf();
+    bridgeEvents(one, hub, target);
+    await handlers[0]!.onReset?.();
+    await handlers[0]!.onReset?.();
+    expect(spyOne).toHaveBeenCalledTimes(4);
+    one.clear();
+    two.clear();
+  });
+});

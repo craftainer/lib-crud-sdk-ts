@@ -275,3 +275,71 @@ describe("cli entry", () => {
     }
   });
 });
+
+describe("generateTypes name checks", () => {
+  const compile: Compile = (_schema, name) =>
+    Promise.resolve(`export interface ${name} {}\n`);
+  const withNames = (...names: Array<[string, string]>) => {
+    const raw = structuredClone(fixture("admin.manifest.json")) as any;
+    const base = raw.resources[0];
+    raw.resources = names.map(([name, version]) => ({
+      ...structuredClone(base),
+      name,
+      api_version: version,
+    }));
+    return parseManifest(raw);
+  };
+
+  it("throws a CrudError naming two resources that map to one type name", async () => {
+    const manifest = withNames(["hero-x", "v1"], ["hero_x", "v1"]);
+    const failure = generateTypes(manifest, "m", compile);
+    await expect(failure).rejects.toThrow(CrudError);
+    await expect(failure).rejects.toThrow(
+      /"hero-x v1" and "hero_x v1" both map to the type name "HeroXV1"/,
+    );
+  });
+
+  it("allows the same name in different versions", async () => {
+    const manifest = withNames(["hero", "v1"], ["hero", "v2"]);
+    await expect(generateTypes(manifest, "m", compile)).resolves.toContain(
+      "HeroV2",
+    );
+  });
+
+  it("throws for a name that is not a valid identifier, before compiling anything", async () => {
+    const seen = vi.fn(compile);
+    for (const [name, version] of [
+      ["1st-heroes", "v1"],
+      ["---", "---"],
+    ] as const) {
+      await expect(
+        generateTypes(withNames(["ok", "v1"], [name, version]), "m", seen),
+      ).rejects.toThrow(/not a valid TypeScript identifier/);
+    }
+    expect(seen).not.toHaveBeenCalled();
+  });
+
+  it("strips credentials, query and hash from a URL source in the header", async () => {
+    const text = await generateTypes(
+      adminManifest,
+      "https://user:pw@api.test/api/_crud/manifest?token=s3cret&x=1#frag",
+      compile,
+    );
+    expect(text).toContain(
+      "from https://api.test/api/_crud/manifest (heroes-api 1.4.0).",
+    );
+    for (const secret of ["s3cret", "pw", "frag", "?"]) {
+      expect(text.split("\n")[0]).not.toContain(secret);
+    }
+  });
+
+  it("leaves an unparsable URL source as given", async () => {
+    const text = await generateTypes(adminManifest, "https://", compile);
+    expect(text).toContain("from https:// (");
+  });
+
+  it("leaves a file source as given", async () => {
+    const text = await generateTypes(adminManifest, "./a?b#c.json", compile);
+    expect(text).toContain("from ./a?b#c.json (");
+  });
+});

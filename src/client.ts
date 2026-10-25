@@ -2,6 +2,7 @@
 import { cacheScope } from "./auth.ts";
 import {
   CapabilityError,
+  ClientError,
   ConnectionFailed,
   InvalidQueryError,
   ManifestError,
@@ -85,17 +86,66 @@ export interface Transport {
   none(call: Call, signal: AbortSignal | undefined): Promise<void>;
 }
 
-const joinUrl = (base: string, path: string): string =>
-  new URL(path, base).href;
+/**
+ * The origins of `allowedOrigins`, normalised (`https://a.example:443` and
+ * `https://a.example` are one). Anything that is not an http(s) origin is a
+ * configuration error.
+ */
+function normalizeOrigins(origins: readonly string[]): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const value of origins) {
+    let origin: string | undefined;
+    try {
+      const url = new URL(value);
+      origin =
+        (url.protocol === "http:" || url.protocol === "https:") &&
+        url.origin !== "null"
+          ? url.origin
+          : undefined;
+    } catch {
+      origin = undefined;
+    }
+    if (origin === undefined) {
+      throw new ClientError(
+        `allowedOrigins entry "${value}" is not an http(s) origin`,
+      );
+    }
+    out.add(origin);
+  }
+  return out;
+}
 
 /** Builds the requests of one resource. */
 class Plan {
   readonly #baseUrl: string;
+  readonly #origins: ReadonlySet<string>;
   readonly resource: Resource;
 
-  constructor(baseUrl: string, resource: Resource) {
+  constructor(
+    baseUrl: string,
+    resource: Resource,
+    allowedOrigins: ReadonlySet<string>,
+  ) {
     this.#baseUrl = baseUrl;
+    this.#origins = new Set([...allowedOrigins, new URL(baseUrl).origin]);
     this.resource = resource;
+  }
+
+  /**
+   * Resolves a manifest-supplied path against `baseUrl`. The client sends its
+   * bearer token there, so a path that leaves baseUrl's origin (an absolute
+   * URL or a protocol-relative `//host`) is refused unless the client lists
+   * that origin in `allowedOrigins`.
+   */
+  #url(path: string): string {
+    const url = new URL(path, this.#baseUrl);
+    if (!this.#origins.has(url.origin)) {
+      throw new ManifestError(
+        `resource "${this.resource.name}": the manifest path "${path}" points at another origin (${url.origin}), ` +
+          "where the token would follow; pass allowedOrigins to the client to allow it",
+      );
+    }
+    return url.href;
   }
 
   #call(
@@ -109,8 +159,7 @@ class Plan {
       ifMatch?: string | undefined;
     } = {},
   ): Call {
-    const url =
-      joinUrl(this.#baseUrl, path) + (query === "" ? "" : `?${query}`);
+    const url = this.#url(path) + (query === "" ? "" : `?${query}`);
     return {
       method,
       url,
@@ -172,7 +221,7 @@ class Plan {
         `resource "${this.resource.name}" does not support events`,
       );
     }
-    return joinUrl(this.#baseUrl, events.path);
+    return this.#url(events.path);
   }
 
   list(o: ListOptions): Call {
@@ -364,9 +413,14 @@ export class ResourceClient<
   readonly #transport: Transport;
 
   /** Use `CrudClient.resource`. */
-  constructor(baseUrl: string, resource: Resource, transport: Transport) {
+  constructor(
+    baseUrl: string,
+    resource: Resource,
+    transport: Transport,
+    allowedOrigins: readonly string[] = [],
+  ) {
     this.resource = resource;
-    this.#plan = new Plan(baseUrl, resource);
+    this.#plan = new Plan(baseUrl, resource, normalizeOrigins(allowedOrigins));
     this.#transport = transport;
   }
 
@@ -506,6 +560,14 @@ export interface ClientOptions {
    * cached data, and keep it constant across reloads of a persisted cache.
    */
   readonly id?: string | undefined;
+  /**
+   * Exact origins (`https://files.example`) that manifest-supplied
+   * `base_path`, `paths.*` and `events.path` may resolve to besides
+   * `baseUrl`'s own. By default such a URL (absolute or protocol-relative) is
+   * refused with a `ManifestError`, because the token would follow it. For
+   * split-origin deployments only.
+   */
+  readonly allowedOrigins?: readonly string[] | undefined;
 }
 
 /** Discovers the manifest and hands out {@link ResourceClient}s. */
@@ -517,6 +579,7 @@ export class CrudClient {
   readonly #tokenProvider: TokenProvider | undefined;
   readonly #middleware: Middleware[];
   readonly #manifestUrl: string | undefined;
+  readonly #allowedOrigins: readonly string[];
   readonly #manifests = new Map<string, Promise<Manifest>>();
   readonly #transport: Transport;
 
@@ -527,6 +590,8 @@ export class CrudClient {
     this.#tokenProvider = options.tokenProvider;
     this.#middleware = [...(options.middleware ?? [])];
     this.#manifestUrl = options.manifestUrl;
+    this.#allowedOrigins = [...(options.allowedOrigins ?? [])];
+    normalizeOrigins(this.#allowedOrigins); // fail at createClient, not at the first call
     this.#transport = {
       json: async (call, signal) => {
         const response = await this.#send(call, signal);
@@ -711,6 +776,7 @@ export class CrudClient {
       this.baseUrl,
       resource,
       this.#transport,
+      this.#allowedOrigins,
     );
   }
 }
