@@ -342,8 +342,9 @@ export function findResource(
   name: string,
   apiVersion?: string,
 ): Resource | undefined {
+  // The manifest spec's `v<N>`; anything else (`v2beta`, `x5`, `next`) ranks lowest.
   const rank = (r: Resource): number =>
-    Number.parseInt(r.api_version.slice(1), 10) || 0;
+    Number(/^v(\d+)$/.exec(r.api_version)?.[1] ?? 0);
   let best: Resource | undefined;
   for (const r of manifest.resources) {
     if (

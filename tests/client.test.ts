@@ -92,6 +92,91 @@ describe("discovery", () => {
     expect((await client.manifest()).service.name).toBe("heroes-api");
   });
 
+  it("keeps serving the last good manifest when a refresh fails", async () => {
+    let fail = false;
+    const { fetch } = fakeFetch(() =>
+      fail ? json({}, { status: 503 }) : json(admin),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+    });
+    const good = await client.manifest();
+    fail = true;
+    await expect(client.manifest({ refresh: true })).rejects.toBeInstanceOf(
+      ServerError,
+    );
+    expect(await client.manifest()).toBe(good);
+    await expect(client.resource("heroes")).resolves.toBeDefined();
+    fail = false;
+    const reloaded = await client.manifest({ refresh: true });
+    expect(await client.manifest()).toBe(reloaded);
+  });
+
+  it("lets the newest refresh win and keeps the cache when it fails after an older one", async () => {
+    const gates: Array<(r: Response) => void> = [];
+    let calls = 0;
+    const { fetch } = fakeFetch(() => {
+      calls += 1;
+      return calls === 1
+        ? json(admin)
+        : new Promise<Response>((resolve) => gates.push(resolve));
+    });
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+    });
+    const first = await client.manifest();
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+    const older = client.manifest({ refresh: true });
+    await tick();
+    const newer = client.manifest({ refresh: true });
+    await tick();
+    gates[1]!(
+      json({ ...(admin as object), service: { name: "newer", version: "2" } }),
+    );
+    await newer;
+    gates[0]!(
+      json({ ...(admin as object), service: { name: "older", version: "1" } }),
+    );
+    await older;
+    expect((await client.manifest()).service.name).toBe("newer");
+    expect(first.service.name).toBe("heroes-api");
+  });
+
+  it("does not re-add a scope that a rotation evicted while its refresh was in flight", async () => {
+    let gate: (r: Response) => void = () => {};
+    let calls = 0;
+    const { fetch } = fakeFetch(() => {
+      calls += 1;
+      return calls === 2
+        ? new Promise<Response>((resolve) => {
+            gate = resolve;
+          })
+        : json(admin);
+    });
+    let token = "a";
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      tokenProvider: () => token,
+    });
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+    await client.manifest(); // scope a
+    const refreshing = client.manifest({ refresh: true }); // call 2, pending
+    await tick();
+    token = "b";
+    await client.manifest(); // scope b: evicts a
+    gate(json(admin));
+    await refreshing;
+    token = "a";
+    await client.manifest(); // a was not re-added: loads again
+    expect(calls).toBe(4);
+  });
+
   it("keeps a newer load when an older one fails late", async () => {
     let reject: (e: Error) => void = () => {};
     let calls = 0;

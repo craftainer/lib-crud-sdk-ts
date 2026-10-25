@@ -218,7 +218,7 @@ export function createCache(options: CacheOptions): Cache {
   const generation = (resource: string | undefined): number =>
     (generations.get(resource ?? "") ?? 0) + globalGeneration;
   const bump = (resource: string): void => {
-    generations.set(resource, generation(resource) + 1);
+    generations.set(resource, (generations.get(resource) ?? 0) + 1);
   };
 
   // -- freshness ---------------------------------------------------------------
@@ -629,12 +629,9 @@ export function createCache(options: CacheOptions): Cache {
         if (entry.etag !== undefined) {
           headers.set("if-none-match", entry.etag);
         }
-        // Detached from the caller's signal: this outlives their request.
-        const request = new Request(state.ctx.request.url, {
-          method: "GET",
-          headers,
-          signal,
-        });
+        // Keeps the caller's init (credentials, redirect, ...) but is detached
+        // from their signal: this outlives their request.
+        const request = new Request(state.ctx.request, { headers, signal });
         const fresh: State = {
           ...state,
           validated: entry.etag !== undefined,

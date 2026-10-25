@@ -41,6 +41,14 @@ function guarded<T extends { readonly done: Promise<void> }>(tx: T): T {
   return tx;
 }
 
+function isInvalidState(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "InvalidStateError"
+  );
+}
+
 export interface IndexedDbStoreOptions {
   /** Database name; default `craftainer-crud-cache`. */
   readonly name?: string;
@@ -97,12 +105,15 @@ export class IndexedDbStore implements CacheStore {
     return this.opening;
   }
 
-  private async openAndSweep(onBlocking: () => void): Promise<IDBPDatabase> {
+  private async openAndSweep(onDropped: () => void): Promise<IDBPDatabase> {
     const db = await openDB(this.name, VERSION, {
       blocking() {
         db.close();
-        onBlocking();
+        onDropped();
       },
+      // The browser closed the connection (storage cleared, evicted): drop it
+      // so the next call opens a fresh one.
+      terminated: onDropped,
       upgrade(upgrading, oldVersion, _newVersion, tx) {
         if (oldVersion < 1) {
           upgrading.createObjectStore(STORE);
@@ -132,26 +143,32 @@ export class IndexedDbStore implements CacheStore {
     await tx.done;
   }
 
-  /** Run `work` on the database; a failure drops the handle (so a later call retries) and yields `fallback`. */
+  /**
+   * Run `work` on the database; a failure yields `fallback`. The handle is
+   * shared by every in-flight call, so it is dropped (and closed) only when it
+   * is itself unusable: it never opened, or it was closed under us
+   * (`InvalidStateError`). Any other failure belongs to one operation (an
+   * uncloneable value, a quota error) and leaves the handle to the others.
+   */
   private async run<T>(
     fallback: T,
     work: (db: IDBPDatabase) => Promise<T>,
   ): Promise<T> {
     // The handle this call runs on: a concurrent call may already have replaced it.
     let used: Promise<IDBPDatabase> | undefined;
+    let db: IDBPDatabase | undefined;
     try {
       used = this.open(); // may throw at once when indexedDB is unusable
-      return await work(await used);
-    } catch {
-      // Drop only our own handle, and close it: an orphaned connection can
-      // block an upgrade, while a newer handle belongs to other calls.
-      if (this.opening === used) {
-        this.opening = undefined;
-      }
-      try {
-        (await used)?.close();
-      } catch {
-        // It never opened.
+      db = await used;
+      return await work(db);
+    } catch (error) {
+      if (db === undefined || isInvalidState(error)) {
+        // Drop only our own handle: a newer one belongs to other calls.
+        if (this.opening === used) {
+          this.opening = undefined;
+        }
+        // An orphaned connection can block an upgrade.
+        db?.close();
       }
       return fallback;
     }

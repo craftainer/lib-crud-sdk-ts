@@ -1,4 +1,5 @@
 import "fake-indexeddb/auto";
+import { IDBVersionChangeEvent } from "fake-indexeddb";
 import { openDB } from "idb";
 import type { IDBPDatabase } from "idb";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -175,13 +176,58 @@ describe("IndexedDbStore", () => {
     await store.close();
   });
 
+  it("a failed operation leaves the shared handle open for concurrent users", async () => {
+    const store = new IndexedDbStore({ name: "t-shared-handle" });
+    await store.set("ok", entry("a"));
+    const handle = await (
+      store as unknown as { opening: Promise<IDBPDatabase> }
+    ).opening;
+    const close = vi.spyOn(handle, "close");
+    const bad = { ...entry("b"), headers: (() => 1) as never };
+    await expect(store.set("bad", bad)).resolves.toBeUndefined();
+    expect(close).not.toHaveBeenCalled();
+    expect((await store.get("ok"))?.body).toBe("a");
+    expect((store as unknown as { opening: unknown }).opening).toBeDefined();
+    await store.close();
+  });
+
+  it("drops a handle that was closed under it and reopens on the next call", async () => {
+    const store = new IndexedDbStore({ name: "t-closed-under" });
+    await store.set("ok", entry("a"));
+    const handle = await (
+      store as unknown as { opening: Promise<IDBPDatabase> }
+    ).opening;
+    handle.close(); // what a browser does when storage is cleared
+    await expect(store.get("ok")).resolves.toBeUndefined(); // InvalidStateError: a miss
+    await store.set("again", entry("b"));
+    expect((await store.get("again"))?.body).toBe("b");
+    await store.close();
+  });
+
+  it("reopens after the browser terminated the connection", async () => {
+    const open = vi.spyOn(fakeIdb, "open");
+    const store = new IndexedDbStore({ name: "t-terminated" });
+    await store.set("ok", entry("a"));
+    const handle = await (
+      store as unknown as { opening: Promise<IDBPDatabase> }
+    ).opening;
+    // What a browser does to a connection it terminates: a `close` event.
+    handle.dispatchEvent(new IDBVersionChangeEvent("close"));
+    expect((await store.get("ok"))?.body).toBe("a");
+    expect(open).toHaveBeenCalledTimes(2);
+    await store.close();
+  });
+
   it("a failure only drops the handle it ran on, not a newer healthy one", async () => {
     const open = vi.spyOn(fakeIdb, "open");
     const store = new IndexedDbStore({ name: "t-stale-handle" });
     await store.set("warm", entry("a")); // handle 1
-    // Fails on handle 1 (not cloneable); the call has already captured it.
-    const bad = { ...entry("b"), headers: (() => 1) as never };
-    const failing = store.set("bad", bad);
+    const handle1 = await (
+      store as unknown as { opening: Promise<IDBPDatabase> }
+    ).opening;
+    handle1.close(); // unusable from now on (InvalidStateError)
+    // Fails on handle 1; the call has already captured it.
+    const failing = store.set("bad", entry("b"));
     // Meanwhile handle 1 was dropped elsewhere and a concurrent call opened handle 2.
     (store as unknown as { opening: undefined }).opening = undefined;
     const concurrent = store.set("kept", entry("c"));

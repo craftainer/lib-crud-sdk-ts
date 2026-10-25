@@ -592,6 +592,8 @@ export class CrudClient {
   readonly #allowedOrigins: readonly string[];
   readonly #allowInsecureHttp: boolean;
   readonly #manifests = new Map<string, Promise<Manifest>>();
+  /** The newest `refresh: true` load per scope, until it settles. */
+  readonly #refreshes = new Map<string, Promise<Manifest>>();
   readonly #transport: Transport;
 
   constructor(options: ClientOptions) {
@@ -760,25 +762,45 @@ export class CrudClient {
     options: { readonly refresh?: boolean } = {},
   ): Promise<Manifest> {
     const scope = await this.scope(); // the manifest is filtered per caller
-    let loading = this.#manifests.get(scope);
-    if (loading === undefined || options.refresh === true) {
-      const started = loadManifest(
-        (url, catalog) => this.#getJson(url, catalog),
-        this.baseUrl,
-        this.#manifestUrl,
-      );
-      loading = started;
-      if (!this.#manifests.has(scope)) {
-        this.#manifests.clear(); // rotated tokens must not pile up manifests
-      }
+    const current = this.#manifests.get(scope);
+    if (current !== undefined && options.refresh !== true) {
+      return current;
+    }
+    const started = loadManifest(
+      (url, catalog) => this.#getJson(url, catalog),
+      this.baseUrl,
+      this.#manifestUrl,
+    );
+    if (current === undefined) {
+      this.#manifests.clear(); // rotated tokens must not pile up manifests
       this.#manifests.set(scope, started);
       started.catch(() => {
         if (this.#manifests.get(scope) === started) {
           this.#manifests.delete(scope);
         }
       });
+    } else {
+      // A refresh replaces the cached manifest only once it loaded, and only
+      // if no newer refresh was started: a failed one rejects here and leaves
+      // the last good manifest to everyone else.
+      this.#refreshes.set(scope, started);
+      const settle = (loaded?: Manifest): void => {
+        if (this.#refreshes.get(scope) === started) {
+          this.#refreshes.delete(scope);
+          // Not for a scope the rotation eviction already dropped.
+          if (
+            loaded !== undefined &&
+            (this.#manifests.has(scope) || this.#manifests.size === 0)
+          ) {
+            this.#manifests.set(scope, Promise.resolve(loaded));
+          }
+        }
+      };
+      started.then(settle, () => {
+        settle();
+      });
     }
-    return loading;
+    return started;
   }
 
   /** A handle for `name` (the highest `api_version` unless given). */

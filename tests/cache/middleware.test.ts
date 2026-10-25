@@ -855,6 +855,26 @@ describe("stale-while-revalidate", () => {
     expect(s.store.get(LIST)?.body).toBe("[2]");
   });
 
+  it("keeps the original request's init (credentials, redirect, ...) on the refresh", async () => {
+    const s = setup({ max_age: 10, stale_while_revalidate: 30 });
+    s.cache.setEventsActive("heroes", true);
+    s.net.push(list([1], null), list([2], null));
+    const original = new Request(ctxFor("list").request.url, {
+      credentials: "include",
+      redirect: "manual",
+      headers: { "x-trace": "t" },
+    });
+    const ctx = { ...ctxFor("list"), request: original };
+    await s.call(ctx);
+    s.clock.t += 10_000;
+    await s.call({ ...ctx, request: new Request(original) });
+    await s.cache.close();
+    const refresh = s.net.sent[1];
+    expect(refresh?.credentials).toBe("include");
+    expect(refresh?.redirect).toBe("manual");
+    expect(refresh?.headers.get("x-trace")).toBe("t");
+  });
+
   it("swallows a failed refresh and allows the next one", async () => {
     const s = await warm();
     s.clock.t += 10_000;

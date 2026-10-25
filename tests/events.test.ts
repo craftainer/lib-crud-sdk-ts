@@ -99,6 +99,54 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+it("takes the manifest's events object as the stream config", () => {
+  // `EventsSpec.replay` is a plain string on the wire; passing the manifest's
+  // object must type-check (tsc covers this file).
+  const spec = {
+    resource: "hero",
+    replay: "persistent" as string,
+    keepalive_seconds: 10,
+  };
+  const hub = getEventHub({ fetch: sseFetch().fn, url: URL_, events: spec });
+  expect(hub).toBeDefined();
+});
+
+it("dispatches to a snapshot: nothing added mid-dispatch, nothing removed mid-dispatch", async () => {
+  const net = sseFetch();
+  const seen: string[] = [];
+  let stopB = (): void => {};
+  let stopC = (): void => {};
+  const base = { fetch: net.fn, url: URL_, events: config };
+  const stopA = subscribeEvents({
+    ...base,
+    onEvent: () => {
+      seen.push("a");
+      stopB(); // B is removed before its turn
+      stopC = subscribeEvents({
+        ...base,
+        onEvent: () => void seen.push("c"), // joins mid-dispatch
+        onStatus: (connected) => void seen.push(`c:${connected}`),
+      });
+    },
+  });
+  stopB = subscribeEvents({
+    ...base,
+    onEvent: () => void seen.push("b"),
+    onStatus: (connected) => void seen.push(`b:${connected}`),
+  });
+  await vi.waitFor(() => expect(net.conns).toHaveLength(1));
+  const conn = net.conns[0]!;
+  conn.push(handshake("abc"));
+  conn.push(frame(1, record("create", 5)));
+  await vi.waitFor(() => expect(seen).toContain("a"));
+  conn.push(frame(2, record("create", 6)));
+  await vi.waitFor(() => expect(seen).toContain("c"));
+  expect(seen).not.toContain("b");
+  expect(seen.filter((entry) => entry === "b:false")).toHaveLength(1);
+  stopA();
+  stopC();
+});
+
 describe("subscribeEvents", () => {
   it("handshakes, fans out events and filters on the server label", async () => {
     const net = sseFetch();

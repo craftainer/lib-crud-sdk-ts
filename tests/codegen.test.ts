@@ -227,6 +227,16 @@ describe("run", () => {
     }
   });
 
+  it("treats a URL scheme case-insensitively (RFC 3986 section 3.1)", async () => {
+    const { fetch, seen } = fakeFetch(() =>
+      json(fixture("admin.manifest.json")),
+    );
+    const h = harness({ fetch, env: {} });
+    const source = `${BASE.replace("https", "HTTPS")}/api/_crud/manifest`;
+    expect(await run(["--manifest", source, "--out", "t.ts"], h.deps)).toBe(0);
+    expect(seen.map((s) => s.url)).toEqual([`${BASE}/api/_crud/manifest`]);
+  });
+
   it.each([
     [[]],
     [["--manifest", "m"]],
