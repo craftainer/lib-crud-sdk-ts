@@ -72,3 +72,21 @@ We will:
   reconnect, since a persisted store may hold older entries.
 - Only `POST`, `PATCH`, `PUT` and `DELETE` clear; an empty IndexedDB database
   name is rejected; a malformed 2xx JSON body is a `ResponseError`.
+
+## Addendum (2026-10-25, late subscribers)
+
+- The clear-on-connect rule holds for every subscriber, not only those
+  present at the handshake: each cache (`invalidateOnEvents`) or QueryClient
+  (`bridgeEvents`, per client and resource) is reset once per connection. A
+  subscriber that joins an already connected hub, or during the handshake's
+  reset fan-out (while the hub is not yet connected), is not in that fan-out;
+  the hub gives it `onStatus(true, connection)` instead, and it resets itself
+  unless that cache or QueryClient was already reset on this `connection`
+  (for example a remount with the same cache), in which case it waits for
+  that reset and does not repeat it.
+- The reset completes before the freshness gate opens. If it fails, the gate
+  stays closed; a drop or unsubscribe during the reset also keeps it closed.
+- The hub's contract is extended, not changed: `onReset` and `onStatus` get an
+  optional `connection` (an opaque object, new for every connect). `onReset`
+  gets it for the connect reset only, not for an event with no usable record
+  id, which always resets.

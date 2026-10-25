@@ -5,7 +5,8 @@
 // staleTime }` objects with `queryKey` tagged through `DataTag`; the React
 // wrappers live in lib-crud-views-ts.
 import type { DataTag, InfiniteData, QueryClient } from "@tanstack/query-core";
-import type { EventHub } from "../events.ts";
+import type { EventConnection, EventHub } from "../events.ts";
+import { resetOnce } from "../reset-once.ts";
 
 export { tanstackApi } from "./adapter.ts";
 export type { TanstackApi } from "./adapter.ts";
@@ -13,6 +14,7 @@ export { tanstackCachePolicy } from "../cache/policy.ts";
 export type { CachePolicy, ManifestCacheHints } from "../cache/policy.ts";
 export { getEventHub, subscribeEvents } from "../events.ts";
 export type {
+  EventConnection,
   EventHandlers,
   EventHub,
   EventHubOptions,
@@ -551,13 +553,22 @@ export function deleteMutationOptions(
  * invalidate and never apply snapshots: `create` invalidates lists, stats and
  * predict; `update`/`delete`/`restore` also the record and its revisions; a
  * reconnect (or an event with no usable record id) invalidates the resource.
- * Returns the unsubscribe.
+ * A bridge that joins an already connected hub (or during the handshake)
+ * invalidates the resource once on subscribing, unless this `queryClient` was
+ * already reset for the resource on that connection. Returns the unsubscribe.
  */
 export function bridgeEvents(
   queryClient: Pick<QueryClient, "invalidateQueries">,
   hub: EventHub,
   target: CrudTarget,
 ): () => void {
+  const reset = (connection: EventConnection): Promise<void> =>
+    resetOnce(
+      connection,
+      queryClient,
+      JSON.stringify([target.client, target.resource]),
+      () => invalidateResource(queryClient, target),
+    );
   return hub.subscribe({
     onEvent: async (event) => {
       const pending = [invalidateCollections(queryClient, target)];
@@ -566,6 +577,14 @@ export function bridgeEvents(
       }
       await Promise.all(pending);
     },
-    onReset: () => invalidateResource(queryClient, target),
+    onReset: (connection) =>
+      connection === undefined
+        ? invalidateResource(queryClient, target)
+        : reset(connection),
+    onStatus: async (up, connection) => {
+      if (up && connection !== undefined) {
+        await reset(connection); // a late joiner is reset like every connect
+      }
+    },
   });
 }

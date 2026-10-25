@@ -12,6 +12,13 @@
  * covered even without replay. A stream silent for three keep-alive
  * intervals is dead and is reconnected with exponential backoff and jitter.
  * Events invalidate; they never apply snapshots.
+ *
+ * Every connection has an identity (an opaque {@link EventConnection}) that
+ * the hub passes to `onReset` (for the connect reset) and to `onStatus(true)`.
+ * A subscriber that joins an already connected hub, or during the handshake's
+ * reset fan-out, gets no connect reset; it sees `onStatus(true)` with a
+ * connection it was never reset for and resets itself (see `invalidateOnEvents`
+ * and `bridgeEvents`).
  */
 import { createParser } from "eventsource-parser";
 import type { EventSourceMessage } from "eventsource-parser";
@@ -27,16 +34,31 @@ export interface EventsConfig {
   readonly keepalive_seconds?: number;
 }
 
+/** Opaque identity of one connection of a hub; a new one per connect. */
+export type EventConnection = object;
+
 /**
  * What a subscriber wants to hear. A handler that throws must not kill the
  * stream, so errors are swallowed; handlers run one after another, in order.
  */
 export interface EventHandlers {
   onEvent(event: CrudEvent): MaybePromise<void>;
-  /** After every connect (the first included), and for an event with no usable record id: clear the resource. */
-  onReset?(): MaybePromise<void>;
-  /** `true` when the stream is connected, `false` on any loss, exit or unsubscribe. */
-  onStatus?(connected: boolean): MaybePromise<void>;
+  /**
+   * After every connect (the first included), and for an event with no usable
+   * record id: clear the resource. `connection` is set for the connect reset
+   * only, and is the same object `onStatus(true)` then receives.
+   */
+  onReset?(connection?: EventConnection): MaybePromise<void>;
+  /**
+   * `true` when the stream is connected, `false` on any loss, exit or
+   * unsubscribe. `connection` identifies the connection when `connected`.
+   * A subscriber that joined after the connect reset gets `true` without
+   * having been sent `onReset` for that connection.
+   */
+  onStatus?(
+    connected: boolean,
+    connection?: EventConnection,
+  ): MaybePromise<void>;
 }
 
 /** A shared event stream: `subscribe` returns the (idempotent) unsubscribe. */
@@ -94,6 +116,7 @@ class Hub {
   private readonly onEmpty: () => void;
   private controller: AbortController | undefined;
   private connected = false;
+  private connection: EventConnection | undefined;
   private subscriberId: string | undefined;
   private attempt = 0;
 
@@ -106,15 +129,16 @@ class Hub {
     // The same object may subscribe twice; give each subscription its own identity.
     const entry: EventHandlers = {
       onEvent: (event) => handlers.onEvent(event),
-      onReset: () => handlers.onReset?.(),
-      onStatus: (connected) => handlers.onStatus?.(connected),
+      onReset: (connection) => handlers.onReset?.(connection),
+      onStatus: (connected, connection) =>
+        handlers.onStatus?.(connected, connection),
     };
     this.handlers.add(entry);
     if (this.controller === undefined) {
       this.controller = new AbortController();
       void this.run(this.controller.signal);
     } else if (this.connected) {
-      void this.guard(() => entry.onStatus?.(true));
+      void this.guard(() => entry.onStatus?.(true, this.connection));
     }
     return () => {
       if (!this.handlers.delete(entry)) {
@@ -148,12 +172,16 @@ class Hub {
     }
   }
 
-  private async setConnected(connected: boolean): Promise<void> {
+  private async setConnected(
+    connected: boolean,
+    connection?: EventConnection,
+  ): Promise<void> {
     if (this.connected === connected) {
       return;
     }
     this.connected = connected;
-    await this.fan((handlers) => handlers.onStatus?.(connected));
+    this.connection = connected ? connection : undefined;
+    await this.fan((handlers) => handlers.onStatus?.(connected, connection));
   }
 
   private backoff(): number {
@@ -256,8 +284,23 @@ class Hub {
       this.attempt = 0;
       // Every connect, the first included: entries stored before this stream
       // (an earlier page session, a persisted store) may predate server changes.
-      await this.fan((handlers) => handlers.onReset?.());
-      await this.setConnected(true);
+      // A subscriber that joins while this fans out is not in it; it gets
+      // `onStatus(true)` with this connection and resets itself.
+      const connection: EventConnection = {};
+      const present = new Set(this.handlers);
+      await this.fan((handlers) => handlers.onReset?.(connection));
+      if (this.connected) {
+        // A repeated handshake on a live stream: whoever joined during the
+        // fan-out was told about the old connection only.
+        this.connection = connection;
+        for (const handlers of Array.from(this.handlers)) {
+          if (!present.has(handlers)) {
+            await this.guard(() => handlers.onStatus?.(true, connection));
+          }
+        }
+      } else {
+        await this.setConnected(true, connection);
+      }
       return;
     }
     if (record["resource"] !== this.options.events.resource) {
