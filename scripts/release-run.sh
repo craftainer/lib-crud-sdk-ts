@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the given command on the host if it has pnpm, else in the pinned Node
-# image (release.yml's bare runner has docker but no pnpm).
+# image (release.yml's bare runners -- the build leg and the publish-packages and
+# verify-published jobs -- have docker but no pnpm).
 #
 # The container sees the working tree at /src and the CI variables npm needs
 # for OIDC trusted publishing and provenance. NODE_AUTH_TOKEN is deliberately
@@ -18,6 +19,7 @@ node_version=$(sed -n 's/^ARG NODE_VERSION=//p' .devcontainer/Dockerfile)
 corepack_version=$(sed -n 's/^COREPACK_VERSION=//p' scripts/develop.d/10-corepack.sh)
 env_args=()
 for name in RELEASE_VERSION RELEASE_TAG RELEASE_ARCH NPM_PUBLISH NPM_TOKEN \
+    RELEASE_CHECK_ATTEMPTS RELEASE_CHECK_DELAY \
     $(env | grep -E '^(GITHUB_|RUNNER_|ACTIONS_)' | cut -d= -f1); do
     env_args+=(-e "$name")
 done
