@@ -3,6 +3,7 @@ import {
   CapabilityError,
   ConnectionFailed,
   CrudClient,
+  InvalidQueryError,
   ManifestError,
   NotFound,
   RateLimited,
@@ -433,6 +434,28 @@ describe("operations", () => {
     }
     expect(out).toEqual([]);
     expect(seen.at(-1)!.url).toBe(`${BASE}${heroes}?skip=7&limit=100`);
+  });
+
+  it("sends only_archived=true on list and iterAll, and throws before a request on a conflict", async () => {
+    const { client, seen } = clientFor(admin, () => json([]));
+    const r = await client.resource("heroes");
+    await r.list({ onlyArchived: true, filters: { name: "a" }, limit: 3 });
+    expect(seen.at(-1)!.url).toBe(
+      `${BASE}${heroes}?name=a&limit=3&only_archived=true`,
+    );
+    await r.list({ onlyArchived: false });
+    expect(seen.at(-1)!.url).toBe(`${BASE}${heroes}`);
+    for await (const _ of r.iterAll({ onlyArchived: true })) {
+      // empty page ends it
+    }
+    expect(seen.at(-1)!.url).toBe(
+      `${BASE}${heroes}?skip=0&limit=100&only_archived=true`,
+    );
+    const count = seen.length;
+    await expect(
+      r.list({ onlyArchived: true, includeArchived: false }),
+    ).rejects.toThrow(InvalidQueryError);
+    expect(seen).toHaveLength(count);
   });
 });
 

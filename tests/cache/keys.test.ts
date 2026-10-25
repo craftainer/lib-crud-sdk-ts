@@ -36,6 +36,17 @@ describe("canonicalQuery", () => {
 describe("buildKey", () => {
   const base = { resource: "heroes", scope: "anon", apiVersion: null };
 
+  it("keeps archived-only and normal lists apart", () => {
+    const normal = buildKey({ ...base, kind: "list", query: "limit=5" });
+    const only = buildKey({
+      ...base,
+      kind: "list",
+      query: "limit=5&only_archived=true",
+    });
+    expect(only).toBe("v1/heroes/list/_/_/anon/limit=5&only_archived=true");
+    expect(only).not.toBe(normal);
+  });
+
   it("puts the version after kind and subject, with _ for none", () => {
     expect(buildKey({ ...base, kind: "list", query: "?skip=0&limit=5" })).toBe(
       "v1/heroes/list/_/_/anon/limit=5&skip=0",

@@ -21,13 +21,19 @@ export interface RequestOptions {
   readonly signal?: AbortSignal | undefined;
 }
 
-/** Options of `list` and `iterAll`. */
+/**
+ * Options of `list` and `iterAll`. `onlyArchived: true` returns only archived
+ * rows (it implies `includeArchived`; with `includeArchived: false` the call
+ * throws `InvalidQueryError` before any request). Non-archivable resources
+ * ignore it.
+ */
 export interface ListOptions extends RequestOptions {
   readonly filters?: Filters | undefined;
   readonly sort?: Sort | undefined;
   readonly skip?: number | undefined;
   readonly limit?: number | undefined;
   readonly includeArchived?: boolean | undefined;
+  readonly onlyArchived?: boolean | undefined;
   readonly includeUnpublished?: boolean | undefined;
 }
 
@@ -36,7 +42,7 @@ export interface WriteOptions extends RequestOptions {
   readonly ifMatch?: string | undefined;
 }
 
-/** Options of `stats`. */
+/** Options of `stats`. There is no `onlyArchived` (the server rejects it on `/stats`). */
 export interface StatsOptions extends RequestOptions {
   readonly bucket?: string | undefined;
   readonly includeArchived?: boolean | undefined;
@@ -176,6 +182,7 @@ class Plan {
       skip: o.skip,
       limit: o.limit,
       includeArchived: o.includeArchived,
+      onlyArchived: o.onlyArchived,
       includeUnpublished: o.includeUnpublished,
     });
     return this.#call("GET", "list", this.#base, query);

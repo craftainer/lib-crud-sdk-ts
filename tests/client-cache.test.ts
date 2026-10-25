@@ -150,6 +150,8 @@ describe("tanstackApi", () => {
     expect(seen.at(-1)?.request.signal.aborted).toBe(false);
     await api.list(undefined);
     expect(seen.at(-1)?.url).toBe(`${BASE}${PATH}`);
+    await api.list({ onlyArchived: true, limit: 5 }, ctl);
+    expect(seen.at(-1)?.url).toBe(`${BASE}${PATH}?limit=5&only_archived=true`);
     await api.get(7, ctl);
     await api.stats({}, ctl);
     expect(seen.at(-1)?.url).toBe(`${BASE}${PATH}/stats`);
