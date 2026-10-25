@@ -353,6 +353,106 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  describe("hub options (first wins)", () => {
+    const noop = { onEvent: () => undefined };
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+
+    it("warns, naming the url and fields, when a later subscriber differs", () => {
+      const warn = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+      const net = sseFetch();
+      const stops = [
+        subscribeEvents({ fetch: net.fn, url: URL_, events: config, ...noop }),
+        subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: { ...config, resource: "other", keepalive_seconds: 5 },
+          ...noop,
+        }),
+        subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: { ...config, replay: "none" },
+          ...noop,
+        }),
+      ];
+      expect(warn).toHaveBeenCalledTimes(2);
+      const first = String(warn.mock.calls[0]?.[0]);
+      expect(first).toContain(URL_);
+      expect(first).toContain("resource, keepalive_seconds");
+      expect(first).not.toContain("replay");
+      expect(String(warn.mock.calls[1]?.[0])).toContain("replay");
+      stops.forEach((stop) => stop());
+    });
+
+    it("stays silent for equal options, defaults included", () => {
+      const warn = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+      const net = sseFetch();
+      const bare: EventsConfig = { resource: "hero" };
+      const stops = [
+        subscribeEvents({ fetch: net.fn, url: URL_, events: bare, ...noop }),
+        subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: {
+            ...bare,
+            resume_param: "subscriber_id",
+            keepalive_seconds: 15,
+          },
+          ...noop,
+        }),
+      ];
+      expect(warn).not.toHaveBeenCalled();
+      stops.forEach((stop) => stop());
+    });
+
+    it("stays silent in production", () => {
+      vi.stubEnv("NODE_ENV", "production");
+      const warn = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+      const net = sseFetch();
+      const stops = [
+        subscribeEvents({ fetch: net.fn, url: URL_, events: config, ...noop }),
+        subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: { ...config, resource: "other" },
+          ...noop,
+        }),
+      ];
+      expect(warn).not.toHaveBeenCalled();
+      stops.forEach((stop) => stop());
+    });
+
+    it("assumes development where there is no process", () => {
+      vi.stubGlobal("process", undefined);
+      const warn = vi
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+      const net = sseFetch();
+      const stops = [
+        subscribeEvents({ fetch: net.fn, url: URL_, events: config, ...noop }),
+        subscribeEvents({
+          fetch: net.fn,
+          url: URL_,
+          events: { ...config, resource: "other" },
+          ...noop,
+        }),
+      ];
+      expect(warn).toHaveBeenCalledTimes(1);
+      stops.forEach((stop) => stop());
+    });
+  });
+
   it("uses a 15 s keep-alive when the manifest gives none", async () => {
     vi.useFakeTimers();
     const net = sseFetch();

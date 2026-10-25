@@ -13,6 +13,12 @@
  * intervals is dead and is reconnected with exponential backoff and jitter.
  * Events invalidate; they never apply snapshots.
  *
+ * A hub is shared by every subscriber of the same (fetch, url) and the first
+ * subscriber's options win: the keep-alive, resume parameter, replay mode and
+ * resource label of later subscribers are ignored. In development
+ * (`process.env.NODE_ENV !== "production"`) a later subscriber whose options
+ * differ gets a `console.warn` naming the URL and the fields.
+ *
  * Every connection has an identity (an opaque {@link EventConnection}) that
  * the hub passes to `onReset` (for the connect reset) and to `onStatus(true)`.
  * A subscriber that joins an already connected hub, or during the handshake's
@@ -71,6 +77,11 @@ export interface EventHubOptions {
   readonly fetch: typeof fetch;
   /** Absolute URL of the events endpoint. */
   readonly url: string;
+  /**
+   * Used only by the first subscriber of a hub (first wins): a later
+   * subscriber's differing `resource`, `resume_param`, `replay` or
+   * `keepalive_seconds` is ignored, with a development `console.warn`.
+   */
   readonly events: EventsConfig;
   /** Jitter source in `[0, 1)`; defaults to `Math.random`. */
   readonly random?: () => number;
@@ -91,6 +102,46 @@ const ACTIONS: ReadonlySet<unknown> = new Set([
   "delete",
   "restore",
 ]);
+
+/** The `events` fields that change what a hub does, with defaults applied. */
+function hubSettings(events: EventsConfig): Record<string, unknown> {
+  return {
+    resource: events.resource,
+    resume_param: events.resume_param ?? "subscriber_id",
+    replay: events.replay,
+    keepalive_seconds: events.keepalive_seconds ?? DEFAULT_KEEPALIVE_S,
+  };
+}
+
+/** `process.env.NODE_ENV` is replaced by bundlers; without it (no `process`) assume development. */
+function inDevelopment(): boolean {
+  try {
+    return process.env.NODE_ENV !== "production";
+  } catch {
+    return true;
+  }
+}
+
+/** Warns, in development, that a later subscriber's options differ from the hub's. */
+function warnOnDifferingOptions(
+  hub: EventHubOptions,
+  later: EventHubOptions,
+): void {
+  if (!inDevelopment()) {
+    return;
+  }
+  const first = hubSettings(hub.events);
+  const next = hubSettings(later.events);
+  const differing = Object.keys(first).filter(
+    (key) => first[key] !== next[key],
+  );
+  if (differing.length > 0) {
+    console.warn(
+      `crud-sdk: the event hub for ${hub.url} was opened with other events options; ` +
+        `the first subscriber's win and these are ignored: ${differing.join(", ")}`,
+    );
+  }
+}
 
 const registry = new WeakMap<typeof fetch, Map<string, Hub>>();
 
@@ -125,7 +176,10 @@ class Hub {
     this.onEmpty = onEmpty;
   }
 
-  subscribe(handlers: EventHandlers): () => void {
+  subscribe(handlers: EventHandlers, requested: EventHubOptions): () => void {
+    if (this.handlers.size > 0) {
+      warnOnDifferingOptions(this.options, requested);
+    }
     // The same object may subscribe twice; give each subscription its own identity.
     const entry: EventHandlers = {
       onEvent: (event) => handlers.onEvent(event),
@@ -334,6 +388,12 @@ class Hub {
 /**
  * The shared hub for `(fetch, url)`: the first subscriber opens the stream,
  * the last one aborts it. A later subscribe after that opens a fresh one.
+ *
+ * The first subscriber's `events` options win while the hub lives. A later
+ * subscriber whose `resource`, `resume_param`, `replay` or `keepalive_seconds`
+ * differ is served by the same stream with the first's values, and in
+ * development (`process.env.NODE_ENV !== "production"`) gets a `console.warn`
+ * naming the URL and the differing fields.
  */
 export function getEventHub(options: EventHubOptions): EventHub {
   return {
@@ -351,7 +411,7 @@ export function getEventHub(options: EventHubOptions): EventHub {
         });
         byUrl.set(options.url, hub);
       }
-      return hub.subscribe(handlers);
+      return hub.subscribe(handlers, options);
     },
   };
 }

@@ -135,6 +135,12 @@ objects, snake_case members).
 - Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
 events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   never apply snapshots. `subscribeEvents` is the lower-level entry.
+- One hub serves every subscriber of the same `(fetch, url)`, and the first
+  subscriber's `events` options win. A later subscriber's differing
+  `resource`, `resume_param`, `replay` or `keepalive_seconds` is ignored; in
+  development (`process.env.NODE_ENV !== "production"`, or when there is no
+  `process`) it gets a `console.warn` naming the URL and the fields. Pass the
+  same manifest `events` object to every subscriber of one stream.
 - Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
   `clearMany(prefixes)` is optional on a custom `CacheStore`.
 - `cacheStatus(response)` says `hit`, `stale`, `revalidated` or `miss`;
