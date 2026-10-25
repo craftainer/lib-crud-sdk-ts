@@ -31,6 +31,7 @@ export {
   ConnectionFailed,
   CrudError,
   Forbidden,
+  InsecureTransportError,
   InvalidQueryError,
   Locked,
   ManifestError,
