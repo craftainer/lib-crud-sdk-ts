@@ -60,14 +60,19 @@ export class IndexedDbStore implements CacheStore {
     fallback: T,
     work: (db: IDBPDatabase) => Promise<T>,
   ): Promise<T> {
+    // The handle this call runs on: a concurrent call may already have replaced it.
+    let used: Promise<IDBPDatabase> | undefined;
     try {
-      return await work(await this.open());
+      used = this.open(); // may throw at once when indexedDB is unusable
+      return await work(await used);
     } catch {
-      // Close the handle we drop: an orphaned connection can block an upgrade.
-      const dropped = this.opening;
-      this.opening = undefined;
+      // Drop only our own handle, and close it: an orphaned connection can
+      // block an upgrade, while a newer handle belongs to other calls.
+      if (this.opening === used) {
+        this.opening = undefined;
+      }
       try {
-        (await dropped)?.close();
+        (await used)?.close();
       } catch {
         // It never opened.
       }

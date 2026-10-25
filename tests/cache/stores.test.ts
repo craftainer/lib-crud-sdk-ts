@@ -173,6 +173,23 @@ describe("IndexedDbStore", () => {
     await store.close();
   });
 
+  it("a failure only drops the handle it ran on, not a newer healthy one", async () => {
+    const open = vi.spyOn(fakeIdb, "open");
+    const store = new IndexedDbStore({ name: "t-stale-handle" });
+    await store.set("warm", entry("a")); // handle 1
+    // Fails on handle 1 (not cloneable); the call has already captured it.
+    const bad = { ...entry("b"), headers: (() => 1) as never };
+    const failing = store.set("bad", bad);
+    // Meanwhile handle 1 was dropped elsewhere and a concurrent call opened handle 2.
+    (store as unknown as { opening: undefined }).opening = undefined;
+    const concurrent = store.set("kept", entry("c"));
+    await failing;
+    await concurrent;
+    expect((await store.get("kept"))?.body).toBe("c");
+    expect(open).toHaveBeenCalledTimes(2); // handle 2 survived the failure on handle 1
+    await store.close();
+  });
+
   it("counts a failing database as a miss and retries later", async () => {
     const open = vi.spyOn(fakeIdb, "open").mockImplementation(() => {
       throw new Error("blocked");

@@ -42,11 +42,27 @@ export function quote(text: string): string {
   );
 }
 
+/**
+ * {@link quote} for caller input: a lone surrogate (an emoji cut in half)
+ * cannot be UTF-8 encoded, which is an invalid argument, not a `URIError`.
+ */
+function encode(text: string): string {
+  try {
+    return quote(text);
+  } catch (error) {
+    // `encodeURIComponent` throws only `URIError`.
+    throw new InvalidQueryError(
+      "a query value is not well-formed Unicode (lone surrogate)",
+      { cause: error },
+    );
+  }
+}
+
 /** Joins already-stringified pairs, encoding keys and values. */
 export function encodeParams(
   pairs: readonly (readonly [string, string])[],
 ): string {
-  return pairs.map(([k, v]) => `${quote(k)}=${quote(v)}`).join("&");
+  return pairs.map(([k, v]) => `${encode(k)}=${encode(v)}`).join("&");
 }
 
 function formatDatetime(value: Date): string | undefined {
@@ -135,7 +151,7 @@ function filterPair(
         `"${key}": a value contains a comma, which separates the list`,
       );
     }
-    return [key, parts.map(quote).join(",")];
+    return [key, parts.map((part) => encode(part)).join(",")];
   }
   const text = formatScalar(field, value);
   if (op === "regex" && [...text].length > MAX_REGEX_LENGTH) {
@@ -143,7 +159,7 @@ function filterPair(
       `"${key}": a regex is limited to ${MAX_REGEX_LENGTH} characters`,
     );
   }
-  return [key, quote(text)];
+  return [key, encode(text)];
 }
 
 const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -196,7 +212,7 @@ function sortValue(
     if (field === undefined || !field.sortable) {
       throw new InvalidQueryError(`cannot sort by "${name}"`);
     }
-    return quote(part);
+    return encode(part);
   });
   if (out.length === 0) {
     throw new InvalidQueryError("sort is empty");
@@ -233,16 +249,16 @@ export function buildQuery(
     parts.push(`id=${intArg("recordId", params.recordId, 0)}`);
   }
   for (const [key, value] of filterPairs(byName, params.filters ?? {})) {
-    parts.push(`${quote(key)}=${value}`); // values arrive encoded; `in` keeps its commas
+    parts.push(`${encode(key)}=${value}`); // values arrive encoded; `in` keeps its commas
   }
   if (params.sort !== undefined) {
     parts.push(
-      `${quote(params.sortParam ?? "sort")}=${sortValue(byName, params.sort)}`,
+      `${encode(params.sortParam ?? "sort")}=${sortValue(byName, params.sort)}`,
     );
   }
   if (params.skip !== undefined) {
     parts.push(
-      `${quote(params.skipParam ?? "skip")}=${intArg("skip", params.skip, 0)}`,
+      `${encode(params.skipParam ?? "skip")}=${intArg("skip", params.skip, 0)}`,
     );
   }
   if (params.limit !== undefined) {
@@ -252,7 +268,7 @@ export function buildQuery(
         `limit ${params.limit} exceeds the server maximum ${params.maxLimit}`,
       );
     }
-    parts.push(`${quote(params.limitParam ?? "limit")}=${text}`);
+    parts.push(`${encode(params.limitParam ?? "limit")}=${text}`);
   }
   if (params.includeArchived !== undefined) {
     parts.push(`include_archived=${params.includeArchived}`);

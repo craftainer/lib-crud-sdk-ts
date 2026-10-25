@@ -117,4 +117,24 @@ describe("buildQuery", () => {
       InvalidQueryError,
     );
   });
+
+  it("rejects a lone surrogate with InvalidQueryError, not a raw URIError", () => {
+    const lone = "\uD800"; // e.g. an emoji truncated in half
+    expect(() => buildQuery(FIELDS, { filters: { free: lone } })).toThrow(
+      InvalidQueryError,
+    );
+    expect(() =>
+      buildQuery(FIELDS, { filters: { free: `ok${lone}` } }),
+    ).toThrow(InvalidQueryError);
+    expect(() =>
+      buildQuery([f("free", "enum", ["in"])], {
+        filters: { free__in: ["a", lone] },
+      }),
+    ).toThrow(InvalidQueryError);
+    expect(() => encodeParams([["bucket", lone]])).toThrow(InvalidQueryError);
+    // A well-formed surrogate pair still encodes.
+    expect(buildQuery(FIELDS, { filters: { free: "\u{1F600}" } })).toBe(
+      "free=%F0%9F%98%80",
+    );
+  });
 });
