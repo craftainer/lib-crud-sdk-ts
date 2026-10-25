@@ -117,14 +117,45 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
 `./tanstack` has no runtime dependency on `@tanstack/query-core`: `crudKeys`,
 `listOptions`/`recordOptions`/`statsOptions`/`predictOptions`/
 `revisionsOptions`/`manifestOptions`, `infiniteListOptions`, the
-`create`/`update`/`deleteMutationOptions` and `bridgeEvents(queryClient, hub,
-resource)`. Use `tanstackCachePolicy` so the SDK cache only revalidates and
-TanStack's `staleTime` owns freshness. The factories take structural slices (`list(query, { signal })`, ...), which
+`create`/`update`/`deleteMutationOptions`, `invalidateResource`/
+`invalidateCollections`/`invalidateRecord` (each takes `{ client, resource }`)
+and `bridgeEvents(queryClient, hub, { client, resource })`, where `client` is
+the id string (`client.id`) and `resource` the same string the keys use. Use
+`tanstackCachePolicy` so the SDK cache only revalidates and TanStack's
+`staleTime` owns freshness. The factories take structural slices (`list(query, { signal })`, ...), which
 the client's options-object methods do not match for `list`, `stats`,
 `predict` and the manifest. `tanstackApi(client, resource)` (from
 `./tanstack`) binds one `ResourceClient` to all of them; a query is the
 client's `ListOptions` (`{ filters, sort, skip, limit, ... }`) without
 `signal`, which TanStack's `signal` fills in.
+
+**Query keys** are namespaced by client and caller scope, so clients or
+callers sharing one `QueryClient` never see each other's data:
+
+```
+["crud", client, resource, scope, kind, ...rest]   kind: list | record | stats | predict | revisions
+["crud", client, "_manifest", scope]
+```
+
+`client` is `CrudClient.id` (`createClient({ id })`, default `baseUrl`; keep it
+stable across reloads of a persisted cache). `scope` is `client.scope()`.
+`await client.namespace()` returns the `{ client, scope }` that every factory
+takes as its first argument (`listOptions(ns, resource, api, query)`,
+`createMutationOptions(queryClient, ns, resource, api)`). `resource` is the
+manifest name, or `name@apiVersion` for a pinned version (a different
+string is a different resource: pass the same one to the invalidate helpers
+and `bridgeEvents`; `_manifest` is reserved). The namespace is a snapshot: a
+token change (login, logout, refresh to another identity) changes the scope,
+so resolve it again then, for example in a provider keyed on the token.
+Clients that share a `baseUrl` but differ in anything else need distinct ids.
+
+Because `resource` precedes `scope`, "everything of resource X on client C" is
+one prefix (`crudKeys.resource(c, x)`, or `invalidateResource(queryClient, c,
+x)`), and `crudKeys.client(c)` clears a whole client. Narrowing by scope, kind
+or record id uses `crudKeys.filter({ client, resource?, scope?, kinds?, id? })`,
+which returns `{ queryKey }` or `{ predicate }` to spread into
+`invalidateQueries`/`removeQueries`. Mutations and `bridgeEvents` invalidate
+every scope of the client's resource, since a write changes what every caller sees.
 
 ```ts
 import { createClient } from "@craftainer/crud-sdk";
@@ -144,7 +175,7 @@ const client = createClient({
   middleware: [cache.middleware, cache.autoIfMatch],
 });
 const api = tanstackApi(client, await client.resource("heroes"));
-useQuery(listOptions("heroes", api, { limit: 50 }));
+useQuery(listOptions(await client.namespace(), "heroes", api, { limit: 50 }));
 ```
 
 Cache keys carry no server origin, so a store shared between servers needs a

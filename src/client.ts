@@ -493,11 +493,19 @@ export interface ClientOptions {
   readonly middleware?: readonly Middleware[] | undefined;
   /** Skips api-catalog discovery. */
   readonly manifestUrl?: string | undefined;
+  /**
+   * Stable identity of this client in TanStack query keys. Defaults to
+   * `baseUrl`; set it when two clients share a `baseUrl` but must not share
+   * cached data, and keep it constant across reloads of a persisted cache.
+   */
+  readonly id?: string | undefined;
 }
 
 /** Discovers the manifest and hands out {@link ResourceClient}s. */
 export class CrudClient {
   readonly baseUrl: string;
+  /** Stable identity in TanStack query keys (`ClientOptions.id`, else `baseUrl`). */
+  readonly id: string;
   readonly #fetch: typeof fetch | undefined;
   readonly #tokenProvider: TokenProvider | undefined;
   readonly #middleware: Middleware[];
@@ -507,6 +515,7 @@ export class CrudClient {
 
   constructor(options: ClientOptions) {
     this.baseUrl = options.baseUrl;
+    this.id = options.id ?? options.baseUrl;
     this.#fetch = options.fetch;
     this.#tokenProvider = options.tokenProvider;
     this.#middleware = [...(options.middleware ?? [])];
@@ -551,6 +560,14 @@ export class CrudClient {
   /** The cache scope of the current caller (`"anon"` or a hash of the token). */
   async scope(): Promise<string> {
     return cacheScope(await this.#token(false));
+  }
+
+  /** The `{ client, scope }` namespace the `./tanstack` key factory takes. */
+  async namespace(): Promise<{
+    readonly client: string;
+    readonly scope: string;
+  }> {
+    return { client: this.id, scope: await this.scope() };
   }
 
   async #dispatch(
