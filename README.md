@@ -211,6 +211,15 @@ which returns `{ queryKey }` or `{ predicate }` to spread into
 `invalidateQueries`/`removeQueries`. Mutations and `bridgeEvents` invalidate
 every scope of the client's resource, since a write changes what every caller sees.
 
+The `create`/`update`/`deleteMutationOptions` follow TanStack's "always
+refetch after error or success": `onSettled` invalidates collections (lists,
+stats, predict) and revisions on both outcomes, so a write that failed with a
+`5xx` or a dropped connection (and may have been applied) is refetched too. A
+failed update or delete also invalidates the record's own query. `onSuccess`
+only does `setQueryData` (update) or `removeQueries` (delete), so nothing is
+invalidated twice. If you spread the options into `useMutation` and add your own
+`onSettled`, call the factory's first.
+
 ```ts
 import { createClient } from "@craftainer/crud-sdk";
 import {
