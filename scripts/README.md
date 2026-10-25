@@ -28,8 +28,8 @@
   only the local artifact); `release-verify-published.sh`
   (`make verify-published`, after `publish-packages`, only when a `*_PUBLISH`
   variable is set) does the same from the registry if `NPM_PUBLISH` is set,
-  with no secrets (a version not there yet, e.g. staged and unapproved, is
-  a notice, not a failure).
+  with no secrets (a version that never appears, e.g. staged and unapproved,
+  fails with an error; re-run the job after approving).
 - `develop.d/`, `post-create.d/` — instance hook directories. This template
   ships `develop.d/10-corepack.sh` (enables pnpm, installing a pinned
   Corepack when Node lacks one) and

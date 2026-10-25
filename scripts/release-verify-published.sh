@@ -13,9 +13,11 @@
 # (retry tuning for registry propagation, defaults 3 and 5 seconds,
 # doubling).
 #
-# A first release is staged, so it is not installable until a maintainer
-# approves it: a version that is not on the registry yet is a notice, not a
-# failure.
+# A version that never shows up on the registry fails the script: a release
+# whose package did not appear must not pass verification. That includes a
+# first release that was staged (`npm stage publish`) and is still awaiting
+# approval; the message says so, and re-running this job after
+# `npm stage approve` verifies it.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,5 +63,7 @@ for ((i = 1; i <= attempts; i++)); do
         delay=$((delay * 2))
     fi
 done
-echo "NOTICE: $name@$version is not yet on the registry (staged, awaiting approval?)."
-echo "NOTICE: approve it with 'npm stage approve <stage-id>'."
+echo "ERROR: $name@$version is not on the registry after $attempts attempts." >&2
+echo "ERROR: if this release was staged (first release, NPM_TOKEN bootstrap), approve it with 'npm stage list && npm stage approve <stage-id>' and re-run this job." >&2
+echo "ERROR: otherwise the publish did not take effect; check the publish-packages job." >&2
+exit 1

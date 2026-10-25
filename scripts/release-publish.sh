@@ -29,6 +29,8 @@ if [[ -z ${NPM_PUBLISH:-} ]]; then
     exit 0
 fi
 
+err=$(mktemp)
+on_exit "rm -f '$err'"
 tarball=$(find_tarball)
 # Before any stage or publish: a mismatch would only fail later, at npm.
 check_repository "$tarball"
@@ -42,10 +44,18 @@ echo "Publishing $name@$version under dist-tag '$tag'."
 # Re-runnable (docs/TEMPLATE.md, release flow): a re-run of the failed jobs
 # after an earlier attempt already published must not publish again, which
 # npm rejects. `npm view name@version version` prints nothing for a version
-# that is not published (or is only staged), so a lookup failure falls
-# through to publishing. A staged tarball cannot be seen here; approve or
-# discard it with `npm stage` before re-running.
-if [[ -n $(npm view "$name@$version" version 2>/dev/null || true) ]]; then
+# that is not published (or is only staged), and E404 means the package is
+# unknown; any other lookup failure (network, auth) stops here rather than
+# guessing. A staged tarball cannot be seen here; approve or discard it with
+# `npm stage` before re-running.
+if ! published=$(npm view "$name@$version" version 2>"$err"); then
+    if ! grep -q E404 "$err"; then
+        cat "$err" >&2
+        exit 1
+    fi
+    published=
+fi
+if [[ -n $published ]]; then
     echo "$name@$version is already on the registry -- nothing to publish."
     exit 0
 fi

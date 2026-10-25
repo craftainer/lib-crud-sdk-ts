@@ -94,20 +94,37 @@ dist_tag() {
     fi
 }
 
-# <url> -> the URL as GitHub knows the repository: `git+` prefix, `.git`
-# suffix and trailing slashes stripped. Case is kept: npm compares it
-# case-sensitively.
+# <repository field as written> -> https://github.com/<owner>/<repo> when it is
+# one of the GitHub forms npm accepts for `repository` (npm's package.json
+# docs and hosted-git-info): the `owner/repo` and `github:owner/repo`
+# shorthands, `[git+]https://`, `http://`, `git://`, `[git+]ssh://[git@]` and
+# the scp form `git@github.com:owner/repo`, each with an optional `.git`
+# suffix and trailing slashes. Prints nothing for any other host, a URL with
+# extra path segments, a `#ref` or an unparseable value. Case is kept: npm
+# compares it case-sensitively.
 normalize_repo_url() {
-    local url=$1
-    url=${url#git+}
-    while [[ $url == */ ]]; do url=${url%/}; done
-    url=${url%.git}
-    while [[ $url == */ ]]; do url=${url%/}; done
-    printf '%s\n' "$url"
+    node -e '
+        const own = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?";
+        const rep = "[A-Za-z0-9._-]+?";
+        const tail = "(?:\\.git)?/*$";
+        const forms = [
+            `^(?:github:)?(${own})/(${rep})${tail}`,
+            `^(?:git\\+)?(?:https?|git|ssh)://(?:[^@/\\s]+@)?github\\.com[/:](${own})/(${rep})${tail}`,
+            `^git@github\\.com:(${own})/(${rep})${tail}`,
+        ];
+        const url = process.argv[1].trim();
+        for (const f of forms) {
+            const m = new RegExp(f).exec(url);
+            if (m) {
+                process.stdout.write(`https://github.com/${m[1]}/${m[2]}\n`);
+                break;
+            }
+        }' "$1"
 }
 
-# <tarball> -> fails unless the packed package.json's `repository.url`
-# (object or string form) is https://github.com/$GITHUB_REPOSITORY. npm's
+# <tarball> -> fails unless the packed package.json's `repository` (object or
+# string form, any GitHub form npm accepts, see normalize_repo_url) names
+# https://github.com/$GITHUB_REPOSITORY. npm's
 # provenance verification rejects the upload otherwise (E422), and an
 # instance created from the template inherits the template's own value until
 # it edits package.json. Called by release-publish.sh only once publishing is
@@ -123,12 +140,12 @@ check_repository() {
         const r = JSON.parse(require("fs").readFileSync(0, "utf8")).repository;
         process.stdout.write(String((r && typeof r === "object" ? r.url : r) ?? ""));')
     if [[ $(normalize_repo_url "$url") != "$want" ]]; then
-        echo "package.json repository.url is \"$url\", expected $want." >&2
+        echo "package.json repository is \"$url\", expected it to name $want." >&2
         echo "npm rejects provenance when they differ (E422). Set repository, homepage and bugs in package.json to this repository:" >&2
         echo "  \"repository\": {\"type\": \"git\", \"url\": \"git+$want.git\"}" >&2
         return 1
     fi
-    echo "OK: package.json repository.url matches $want."
+    echo "OK: package.json repository matches $want."
 }
 
 # Shared by release-check.sh (the local tarball) and release-verify-published.sh
