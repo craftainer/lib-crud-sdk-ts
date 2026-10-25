@@ -5,7 +5,11 @@
   regardless of instance language. An instance adds its own language
   runtime/tooling install on top, either by extending this script or
   copying its shape into a second script. Prefer the hook below over
-  either.
+  either. Every download goes through its `fetch` helper (bounded curl
+  retries with backoff; GitHub URLs authenticated when the optional
+  `github_token` BuildKit secret is present) and the installers that
+  download for themselves through `retry`, so CI's shared-IP HTTP 429s
+  don't fail the image build. Local builds need no token.
 - `post-create.sh` — the devcontainer's `postCreateCommand`: git
   `safe.directory`, `prek install`, then every `post-create.d/*.sh`.
 - `release-*.sh` — the release logic behind the `Makefile` targets (see
@@ -14,13 +18,18 @@
   host, or in the pinned Node image when the host has no pnpm;
   `release-build.sh` stamps the version, builds and packs into `dist/`;
   `release-sbom.sh` (+ `release-sbom-install.sh`, `release-field.sh`) writes the SPDX SBOM;
-  `release-publish.sh` skips, stages with the bootstrap token
+  `release-publish.sh` (`make publish-packages`; `make publish` is a no-op) skips (with a `::warning::`), first checks
+  `repository.url` against `GITHUB_REPOSITORY` (`check_repository` in
+  `release-lib.sh`), stages with the bootstrap token
   (`npm stage publish`) or publishes through OIDC, under a dist-tag from
   `dist_tag` (prerelease id or `next`; `v<major>-latest` for a backport); `release-check.sh`
   installs the `dist/` tarball into a scratch project and imports every
-  `exports` entry, then, if `NPM_PUBLISH` is set, does the same from the
-  registry (a version not there yet, e.g. staged and unapproved, is a
-  notice, not a failure).
+  `exports` entry (it gates the GitHub release and publishing, so it checks
+  only the local artifact); `release-verify-published.sh`
+  (`make verify-published`, after `publish-packages`, only when a `*_PUBLISH`
+  variable is set) does the same from the registry if `NPM_PUBLISH` is set,
+  with no secrets (a version not there yet, e.g. staged and unapproved, is
+  a notice, not a failure).
 - `develop.d/`, `post-create.d/` — instance hook directories. This template
   ships `develop.d/10-corepack.sh` (enables pnpm, installing a pinned
   Corepack when Node lacks one) and
@@ -29,6 +38,8 @@
 
 ## Do
 
+- Pass a token to the build as a BuildKit secret (`github_token`), never
+  a `--build-arg`/`ARG`: an ARG is baked into the image history.
 - Keep this script's own tools pinned to an exact version (a `# renovate:`
   ARG in `../.devcontainer/Dockerfile`) and checksum-verified where the upstream project
   publishes checksums, matching the pattern each install step here already

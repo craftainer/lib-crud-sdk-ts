@@ -93,3 +93,75 @@ dist_tag() {
         echo "v${version%%.*}-latest"
     fi
 }
+
+# <url> -> the URL as GitHub knows the repository: `git+` prefix, `.git`
+# suffix and trailing slashes stripped. Case is kept: npm compares it
+# case-sensitively.
+normalize_repo_url() {
+    local url=$1
+    url=${url#git+}
+    while [[ $url == */ ]]; do url=${url%/}; done
+    url=${url%.git}
+    while [[ $url == */ ]]; do url=${url%/}; done
+    printf '%s\n' "$url"
+}
+
+# <tarball> -> fails unless the packed package.json's `repository.url`
+# (object or string form) is https://github.com/$GITHUB_REPOSITORY. npm's
+# provenance verification rejects the upload otherwise (E422), and an
+# instance created from the template inherits the template's own value until
+# it edits package.json. Called by release-publish.sh only once publishing is
+# on. Skipped with a notice when GITHUB_REPOSITORY is
+# unset, i.e. outside GitHub Actions.
+check_repository() {
+    if [[ -z ${GITHUB_REPOSITORY:-} ]]; then
+        echo "NOTICE: GITHUB_REPOSITORY not set -- skipping the package.json repository.url check."
+        return 0
+    fi
+    local url want="https://github.com/$GITHUB_REPOSITORY"
+    url=$(tar -xzOf "$1" package/package.json | node -e '
+        const r = JSON.parse(require("fs").readFileSync(0, "utf8")).repository;
+        process.stdout.write(String((r && typeof r === "object" ? r.url : r) ?? ""));')
+    if [[ $(normalize_repo_url "$url") != "$want" ]]; then
+        echo "package.json repository.url is \"$url\", expected $want." >&2
+        echo "npm rejects provenance when they differ (E422). Set repository, homepage and bugs in package.json to this repository:" >&2
+        echo "  \"repository\": {\"type\": \"git\", \"url\": \"git+$want.git\"}" >&2
+        return 1
+    fi
+    echo "OK: package.json repository.url matches $want."
+}
+
+# Shared by release-check.sh (the local tarball) and release-verify-published.sh
+# (the published release).
+# <dir> <name> <expected version>: import `name` and every exports subpath (ESM,
+# Node) from the package installed in <dir>.
+check_import() {
+    (cd "$1" && node --input-type=module -e '
+        import { readFileSync } from "node:fs";
+        const [name, want] = process.argv.slice(1);
+        const pkg = JSON.parse(readFileSync(`node_modules/${name}/package.json`, "utf8"));
+        if (pkg.version !== want) throw new Error(`installed ${name} ${pkg.version}, expected ${want}`);
+        // exports may be missing, a string, an array, a conditions object
+        // (no "."-prefixed keys) or a subpath map; only the last has several
+        // entries. Without a subpath map the entry is the bare package name.
+        const exp = pkg.exports;
+        const isMap = exp && typeof exp === "object" && !Array.isArray(exp)
+            && Object.keys(exp).some((k) => k.startsWith("."));
+        const keys = isMap ? Object.keys(exp) : ["."];
+        for (const key of keys) {
+            if (key.endsWith(".json") || (isMap && exp[key] === null)) continue;
+            if (key.includes("*")) {
+                console.log(`NOTICE: skipping wildcard export ${key}`);
+                continue;
+            }
+            const spec = name + key.slice(1);
+            const mod = await import(spec);
+            console.log(`OK: import ${spec} (${Object.keys(mod).length} exports)`);
+        }
+    ' "$2" "$3")
+}
+
+install_into() { # <dir> <package spec>
+    echo '{"private":true,"type":"module"}' >"$1/package.json"
+    (cd "$1" && npm install --ignore-scripts --no-audit --no-fund --silent "$2")
+}

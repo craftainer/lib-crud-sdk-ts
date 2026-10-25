@@ -115,3 +115,7 @@ node_modules
 *.tsbuildinfo
 coverage/
 *.tgz
+
+# Python bytecode (the scripts-tests hook runs the tests in-tree)
+__pycache__/
+*.pyc
