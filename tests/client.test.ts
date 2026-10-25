@@ -238,6 +238,14 @@ describe("auth", () => {
     expect(await anon.client.token()).toBeNull();
     expect(await anon.client.scope()).toBe("anon");
     expect(await client.scope()).toBe(await cacheScope("tok"));
+    expect(await client.namespace()).toEqual({
+      client: client.baseUrl,
+      scope: await cacheScope("tok"),
+    });
+  });
+
+  it("identifies itself by id, defaulting to baseUrl", () => {
+    expect(clientFor(admin, undefined, { id: "main" }).client.id).toBe("main");
   });
 
   it("refreshes once after a 401 and retries with the new scope", async () => {
