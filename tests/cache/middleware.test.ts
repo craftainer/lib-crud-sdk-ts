@@ -597,6 +597,88 @@ describe("write-through", () => {
     await s.call(ctxFor("bulk_update", { method: "PATCH", query: "?a=1" }));
     expect(s.store.get(LIST)).toBeDefined();
   });
+
+  it("a write that throws or gets a 5xx may have been applied: it clears what a success would", async () => {
+    const outcomes: Array<[string, () => Response | Promise<Response>]> = [
+      [
+        "throws",
+        () => {
+          throw new Error("socket closed");
+        },
+      ],
+      ["500", () => json({ detail: "boom" }, { status: 500 })],
+      ["504", () => json({ detail: "late" }, { status: 504 })],
+    ];
+    for (const [, outcome] of outcomes) {
+      const s = setup();
+      s.net.push(
+        list(),
+        json({ id: 5 }, { headers: { etag: ETAG1 } }),
+        outcome,
+      );
+      await s.call(ctxFor("list"));
+      await s.call(ctxFor("record", { recordId: 5, query: "?id=5" }));
+      expect(s.store.size).toBe(2);
+      const write = s.call(
+        ctxFor("update", {
+          method: "PATCH",
+          recordId: 5,
+          query: "?id=5",
+        }),
+      );
+      if (outcome === outcomes[0]![1]) {
+        await expect(write).rejects.toThrow("socket closed");
+      } else {
+        await write;
+      }
+      expect(s.store.size).toBe(0);
+    }
+  });
+
+  it("a write aborted before it was sent clears nothing and rethrows its own error", async () => {
+    const s = setup();
+    s.net.push(list(), () => {
+      throw new DOMException("aborted", "AbortError");
+    });
+    await s.call(ctxFor("list"));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      s.call(ctxFor("create", { method: "POST", signal: controller.signal })),
+    ).rejects.toThrow("aborted");
+    expect(s.store.size).toBe(1);
+  });
+
+  it("a write aborted mid-flight may have been applied and clears", async () => {
+    const s = setup();
+    const controller = new AbortController();
+    s.net.push(list(), () => {
+      controller.abort();
+      throw new DOMException("aborted", "AbortError");
+    });
+    await s.call(ctxFor("list"));
+    await expect(
+      s.call(ctxFor("create", { method: "POST", signal: controller.signal })),
+    ).rejects.toThrow("aborted");
+    expect(s.store.size).toBe(0);
+  });
+
+  it("an unknown write outcome clears a create's collections and a bulk op's whole resource", async () => {
+    const create = setup();
+    create.net.push(list(), () => {
+      throw new Error("reset");
+    });
+    await create.call(ctxFor("list"));
+    await expect(
+      create.call(ctxFor("create", { method: "POST" })),
+    ).rejects.toThrow("reset");
+    expect(create.store.size).toBe(0);
+    const bulk = setup();
+    bulk.net.push(list(), json({}, { status: 502 }));
+    await bulk.call(ctxFor("list"));
+    await bulk.call(ctxFor("bulk_delete", { method: "DELETE", query: "?a=1" }));
+    expect(bulk.store.size).toBe(0);
+  });
 });
 
 describe("412 on a stale If-Match", () => {

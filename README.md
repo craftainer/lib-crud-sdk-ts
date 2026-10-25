@@ -132,6 +132,12 @@ objects, snake_case members).
   Every connection clears the resource once per cache, including for a
   subscription that joins an already connected stream, which clears before
   its gate opens.
+- A write clears what it touches when it succeeds. A write whose outcome is
+  unknown (the request threw, or the answer was `5xx`) clears the same, since
+  the server may have applied it; a refused write (any other status below `500`) clears
+  nothing, except `412`, which evicts the record. A bulk write of unknown outcome clears
+  the whole resource, as its ids are not known. A write aborted before it
+  was sent clears nothing.
 - Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
 events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   never apply snapshots. `subscribeEvents` is the lower-level entry.
@@ -141,6 +147,8 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   development (`process.env.NODE_ENV !== "production"`, or when there is no
   `process`) it gets a `console.warn` naming the URL and the fields. Pass the
   same manifest `events` object to every subscriber of one stream.
+- A `keepalive_seconds` that is zero, negative or not finite is treated as
+  unset: the 15 s default applies (a stream silent for three intervals is dead).
 - Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
   `clearMany(prefixes)` is optional on a custom `CacheStore`.
 - `cacheStatus(response)` says `hit`, `stale`, `revalidated` or `miss`;

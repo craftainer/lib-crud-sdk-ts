@@ -502,21 +502,29 @@ export function createCache(options: CacheOptions): Cache {
     return [{ type: "set", key, entry, ttlMs: retentionMs(fresh, stale) }];
   };
 
+  /**
+   * The store changes a write calls for. `response` is `undefined` when the
+   * request threw: like a `5xx`, the outcome is unknown (the server may have
+   * applied the write before the failure), so it clears what a success would
+   * have, minus the write-through, and for a bulk op the whole resource (the
+   * ids are unknown). Other failures changed nothing.
+   */
   const writeOps = (
     state: State,
-    response: Response,
+    response: Response | undefined,
     body: string | undefined,
   ): StoreOp[] => {
     const { op, recordId } = state.ctx;
     const resource = state.ctx.resource as string;
-    const { status } = response;
+    const status = response?.status;
     if (status === 412) {
       return recordId === undefined
         ? []
         : clears([recordPrefix(resource, recordId)]);
     }
-    if (status < 200 || status >= 300) {
-      return [];
+    const ok = status !== undefined && status >= 200 && status < 300;
+    if (!ok && status !== undefined && status < 500) {
+      return []; // refused: nothing changed
     }
     const collections = collectionPrefixes(resource);
     if (CREATES.has(op)) {
@@ -529,12 +537,12 @@ export function createCache(options: CacheOptions): Cache {
           revisionsPrefix(resource, recordId),
           recordPrefix(resource, recordId),
         ]),
-        ...(op === "update"
+        ...(op === "update" && response !== undefined && ok
           ? writeThrough(state, response, body, resource, recordId)
           : []),
       ];
     }
-    if (BULK_OPS.has(op) || op === "restore") {
+    if (ok && (BULK_OPS.has(op) || op === "restore")) {
       // Bulk ops and a bulk restore always have their body read (see `readBody`).
       const ids = idsFromBody(body as string);
       if (ids !== undefined) {
@@ -581,6 +589,15 @@ export function createCache(options: CacheOptions): Cache {
       state.kind === undefined
         ? { result: response, ops: writeOps(state, response, body) }
         : readPlan(state, response, body);
+    await applyOps(state, ops);
+    return result;
+  };
+
+  /** Apply `ops`, guarding against an invalidation that lands meanwhile. */
+  const applyOps = async (
+    state: State,
+    ops: readonly StoreOp[],
+  ): Promise<void> => {
     if (state.kind === undefined && ops.some((op) => op.type === "clear")) {
       bump(state.ctx.resource as string); // before applying: reads now in flight must not store fresh
     }
@@ -594,7 +611,6 @@ export function createCache(options: CacheOptions): Cache {
         await apply({ type: "delete", key: op.key });
       }
     }
-    return result;
   };
 
   // -- stale-while-revalidate --------------------------------------------------
@@ -644,7 +660,22 @@ export function createCache(options: CacheOptions): Cache {
       return next(ctx);
     }
     if (state.kind === undefined) {
-      return finish(state, await next(ctx));
+      const unsent = ctx.request.signal.aborted; // aborted mid-flight is unknown, not unsent
+      let response: Response;
+      try {
+        response = await next(ctx);
+      } catch (error) {
+        // The write may have been applied before it failed: forget what it
+        // touches, unless it was aborted before it could be sent. The
+        // caller still gets the original error.
+        if (!unsent) {
+          await safe(() =>
+            applyOps(state, writeOps(state, undefined, undefined)),
+          );
+        }
+        throw error;
+      }
+      return finish(state, response);
     }
     state.entry = await safe(() => store.get(state.key as string));
     const decision = decide(state, state.entry);
