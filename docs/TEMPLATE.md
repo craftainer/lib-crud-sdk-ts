@@ -193,7 +193,14 @@ on them or double-publishing.
 The `release` job is re-runnable too: if the release already exists it
 skips `finalize` and the release creation (a leftover draft is deleted and
 recreated), so re-running failed jobs after a later job failed does not
-fail on the existing release. If `release` itself failed before the release
+fail on the existing release. It first checks that the existing
+release's tag points at the commit this run built, and fails (rather than
+warns) if the tag can't be resolved or points elsewhere. The tag lookup is
+tried up to three times, but only for a transient failure (HTTP 5xx or 429,
+or a network error). A tag that does not exist (the API answers 404, or 422
+"No commit found") or any other permanent error fails at once with a message
+saying so; re-running cannot help, so restore the tag or delete the release
+and run the workflow again. If `release` itself failed before the release
 existed, `finalize` runs again on the re-run, so an instance's `finalize`
 must be safe to repeat (it must not double-apply its side effects).
 `verify-published` runs only after `publish-packages` succeeded, so after a
@@ -503,8 +510,10 @@ runs once, not per arch, and holds `id-token: write`; the per-arch `build`
 job has neither that nor the token.
 Before any stage or publish it checks, with `check_repository` in
 `scripts/release-lib.sh`, that the tarball's `repository` names
-`https://github.com/$GITHUB_REPOSITORY` (case-sensitive). Every GitHub form npm
-accepts passes: the `owner/repo` and `github:owner/repo` shorthands,
+`https://github.com/$GITHUB_REPOSITORY` (owner and repo case-sensitive). Every GitHub form npm
+accepts passes (as in npm's hosted-git-info, the scheme is case-insensitive,
+a `www.` host prefix is dropped, and the host is case-insensitive only in a
+plain `http(s)://` URL): the `owner/repo` and `github:owner/repo` shorthands,
 `[git+]https://`, `git://`, `[git+]ssh://` and `git@github.com:owner/repo`
 URLs, with or without `.git` and a trailing slash; another host, extra path
 segments or a `#ref` do not. This is checked because npm's provenance
@@ -526,7 +535,14 @@ publishing for 2FA-bypass tokens. `npm stage publish` uploads the tarball
 to a staging area without 2FA and creates a public `0.0.0-stage`
 placeholder; the real version stays private until a maintainer approves it
 with 2FA (`npm stage list`, then `npm stage approve <stage-id>`, or on
-npmjs.com). Afterwards configure the package's trusted publisher on
+npmjs.com). **Known limitation:** `publish-packages` is not safe to re-run
+while a staged version is still unapproved. `npm view` does not see a staged
+version, so a re-run stages a duplicate, and nothing can detect it: `npm stage
+list` cannot use OIDC tokens (it needs interactive authentication), and a
+stage-only token is documented to stage, deprecate and move dist-tags only.
+Approve or reject the existing stage (`npm stage approve|reject <stage-id>`)
+before re-running `publish-packages`; after approving, re-run only
+`verify-published`. Afterwards configure the package's trusted publisher on
 npmjs.com (repository, workflow `release.yml`), delete the `NPM_TOKEN`
 secret, and later releases take the OIDC path. npm expires a trusted
 publisher that has not published within 48 hours of being configured.
@@ -555,13 +571,17 @@ defensively; never map `NPM_TOKEN` to it in a workflow.
 **`release-check`** installs the `dist/` tarball into a scratch project and
 imports every `exports` entry (ESM, Node), checking the installed version.
 **`verify-published`** (when `NPM_PUBLISH` is set) looks the version up with
-`npm view`, retrying for registry propagation: if found it is installed from
+`npm view`, retrying for registry propagation (10 attempts, 5 s
+doubling up to 60 s, about 6 minutes: npm can take minutes to show a fresh
+version; tune with `RELEASE_CHECK_ATTEMPTS`, `RELEASE_CHECK_DELAY`,
+`RELEASE_CHECK_MAX_DELAY`): if found it is installed from
 the registry and imported too; if it never appears, the script fails with an
 error, because a release whose package did not appear must not pass. That
 includes a staged first release that is not approved yet: approve it
 (`npm stage approve <stage-id>`) and re-run the `verify-published` job.
-"Not found" is both an E404 and `npm view` exiting 0 with
-empty output (the package exists, that version does not). Any other lookup
+"Not found" is both an E404 (read from the `error.code` of `npm view
+--json`, not matched as text) and `npm view` exiting 0 with empty output (the
+package exists, that version does not). Any other lookup
 failure (network, auth) fails the check.
 The template itself never publishes (`NPM_PUBLISH` unset) but its release
 must pass the tarball check.

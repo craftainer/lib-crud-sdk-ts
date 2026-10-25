@@ -40,6 +40,44 @@ use_npm() {
 }
 npm() { "$NPM_BIN" "$@"; }
 
+# <package spec> <field> -> that field of `npm view`, printed bare; nothing when
+# it is missing (a version not published or still propagating, or no such
+# dist-tag) or when the package itself is unknown (E404). Any other failure
+# (network, auth, ...) prints npm's output to stderr and returns 1. The E404 is
+# read from the `error.code` of `npm view --json`'s JSON error on stdout, not
+# matched as text in stderr, where any message may happen to contain "E404".
+npm_view_field() {
+    local out err code
+    err=$(mktemp)
+    if out=$(npm view --json "$1" "$2" 2>"$err"); then
+        rm -f "$err"
+        printf '%s' "$out" | node -e '
+            const t = require("fs").readFileSync(0, "utf8").trim();
+            if (!t) process.exit(0);
+            let v = JSON.parse(t);
+            if (Array.isArray(v)) v = v[v.length - 1];
+            if (typeof v !== "string") {
+                console.error(`unexpected npm view output: ${t}`);
+                process.exit(1);
+            }
+            process.stdout.write(v);'
+        return
+    fi
+    code=$(printf '%s' "$out" | node -e '
+        try {
+            const j = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            process.stdout.write(String(j?.error?.code ?? ""));
+        } catch {}')
+    if [[ $code == E404 ]]; then
+        rm -f "$err"
+        return 0
+    fi
+    cat "$err" >&2
+    [[ -z $out ]] || printf '%s\n' "$out" >&2
+    rm -f "$err"
+    return 1
+}
+
 # The packed tarball in dist/ (exactly one).
 find_tarball() {
     local tarballs
@@ -56,7 +94,7 @@ find_tarball() {
 # <tarball> <field> -> that field of the packed package.json.
 tarball_field() {
     tar -xzOf "$1" package/package.json | node -e \
-        'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0, "utf8"))[process.argv[1]]))' "$2"
+        'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0, "utf8"))[process.argv[1]]))' -- "$2"
 }
 
 # <name> <version> -> the dist-tag to publish under.
@@ -67,23 +105,14 @@ tarball_field() {
 #    `latest` (no latest yet = first release); a backport (1.4.3 after 2.0.0)
 #    gets `v<major>-latest` instead, so it cannot move `latest` backwards.
 dist_tag() {
-    local name=$1 version=${2%%+*} pre id current err
+    local name=$1 version=${2%%+*} pre id current
     if [[ $version == *-* ]]; then
         pre=${version#*-}
         id=${pre%%.*}
         if [[ -z $id || $id =~ ^[0-9]+$ ]]; then echo next; else echo "$id"; fi
         return
     fi
-    err=$(mktemp)
-    if ! current=$(npm view "$name" dist-tags.latest 2>"$err"); then
-        if ! grep -q E404 "$err"; then
-            cat "$err" >&2
-            rm -f "$err"
-            return 1
-        fi
-        current=
-    fi
-    rm -f "$err"
+    current=$(npm_view_field "$name" dist-tags.latest) || return 1
     # Only the core is compared: a prerelease `latest` (1.0.0-rc.1) is older
     # than the stable 1.0.0 it precedes.
     current=${current%%-*}
@@ -100,26 +129,32 @@ dist_tag() {
 # shorthands, `[git+]https://`, `http://`, `git://`, `[git+]ssh://[git@]` and
 # the scp form `git@github.com:owner/repo`, each with an optional `.git`
 # suffix and trailing slashes. Prints nothing for any other host, a URL with
-# extra path segments, a `#ref` or an unparseable value. Case is kept: npm
-# compares it case-sensitively.
+# extra path segments, a `#ref` or an unparseable value. Owner and repo keep
+# their case (npm compares them case-sensitively). Matching npm's own
+# hosted-git-info: the scheme is case-insensitive, a `www.` host prefix is
+# dropped, and the host is case-insensitive only in a plain `http(s)://` URL
+# (`HTTPS://GitHub.com/o/r`), not behind `git+` or in the git, ssh and scp forms.
 normalize_repo_url() {
     node -e '
         const own = "[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?";
         const rep = "[A-Za-z0-9._-]+?";
         const tail = "(?:\\.git)?/*$";
+        const host = "(?:www\\.)?github\\.com";
         const forms = [
             `^(?:github:)?(${own})/(${rep})${tail}`,
-            `^(?:git\\+)?(?:https?|git|ssh)://(?:[^@/\\s]+@)?github\\.com[/:](${own})/(${rep})${tail}`,
-            `^git@github\\.com:(${own})/(${rep})${tail}`,
+            `^(?:git\\+)?(?:https?|git|ssh)://(?:[^@/\\s]+@)?${host}[/:](${own})/(${rep})${tail}`,
+            `^git@${host}:(${own})/(${rep})${tail}`,
         ];
-        const url = process.argv[1].trim();
+        let url = process.argv[1].trim();
+        url = url.replace(/^(?:git\+)?[a-z]+(?=:\/\/)/i, (s) => s.toLowerCase());
+        url = url.replace(/^(https?:\/\/(?:[^@\/\s]+@)?)([^\/:\s]+)/, (_, a, h) => a + h.toLowerCase());
         for (const f of forms) {
             const m = new RegExp(f).exec(url);
             if (m) {
                 process.stdout.write(`https://github.com/${m[1]}/${m[2]}\n`);
                 break;
             }
-        }' "$1"
+        }' -- "$1"
 }
 
 # <tarball> -> fails unless the packed package.json's `repository` (object or
@@ -175,7 +210,7 @@ check_import() {
             const mod = await import(spec);
             console.log(`OK: import ${spec} (${Object.keys(mod).length} exports)`);
         }
-    ' "$2" "$3")
+    ' -- "$2" "$3")
 }
 
 install_into() { # <dir> <package spec>
