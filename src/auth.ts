@@ -28,3 +28,25 @@ export async function cacheScope(
 export function staticToken(token: string | null): TokenProvider {
   return () => token;
 }
+
+/**
+ * Whether `url` is plain `http:` to a host that is not loopback. Loopback is
+ * `localhost`, `*.localhost`, `127.0.0.0/8` and `[::1]`, judged on the parsed
+ * hostname (so `http://localhost.evil.example` is not loopback). `https:` and
+ * any other scheme are never insecure here.
+ */
+export function isInsecureRemote(url: string): boolean {
+  const { protocol, hostname } = new URL(url);
+  if (protocol !== "http:") {
+    return false;
+  }
+  // WHATWG URL has already normalised numeric hosts (`127.1` -> `127.0.0.1`)
+  // and lower-cased the name; a trailing dot is the same host.
+  const host = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+  return !(
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  );
+}

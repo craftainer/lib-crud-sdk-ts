@@ -20,6 +20,13 @@ export class CapabilityError extends ClientError {}
 /** A filter, sort or paging argument is not valid for the resource. */
 export class InvalidQueryError extends ClientError {}
 
+/**
+ * A request carrying an `Authorization` header was about to go over plain
+ * `http:` to a non-loopback host. Nothing was sent. Use `https:`, or opt in
+ * with `allowInsecureHttp`.
+ */
+export class InsecureTransportError extends ClientError {}
+
 /** The discovery document or the manifest is missing, unusable or of an unknown version. */
 export class ManifestError extends ClientError {}
 

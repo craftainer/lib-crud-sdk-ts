@@ -1,9 +1,10 @@
 /** Fetch client: manifest-driven resource handles over a middleware chain. */
-import { cacheScope } from "./auth.ts";
+import { cacheScope, isInsecureRemote } from "./auth.ts";
 import {
   CapabilityError,
   ClientError,
   ConnectionFailed,
+  InsecureTransportError,
   InvalidQueryError,
   ManifestError,
   ResponseError,
@@ -568,6 +569,15 @@ export interface ClientOptions {
    * split-origin deployments only.
    */
   readonly allowedOrigins?: readonly string[] | undefined;
+  /**
+   * Allow sending an `Authorization` header (the bearer token) over plain
+   * `http:` to a host that is not loopback. Default `false`: such a request
+   * is refused with {@link InsecureTransportError} before it is sent.
+   * Loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`) and
+   * anonymous requests are always allowed. Opt in only for a trusted
+   * network, as the token is readable on the wire.
+   */
+  readonly allowInsecureHttp?: boolean | undefined;
 }
 
 /** Discovers the manifest and hands out {@link ResourceClient}s. */
@@ -580,6 +590,7 @@ export class CrudClient {
   readonly #middleware: Middleware[];
   readonly #manifestUrl: string | undefined;
   readonly #allowedOrigins: readonly string[];
+  readonly #allowInsecureHttp: boolean;
   readonly #manifests = new Map<string, Promise<Manifest>>();
   readonly #transport: Transport;
 
@@ -591,6 +602,7 @@ export class CrudClient {
     this.#middleware = [...(options.middleware ?? [])];
     this.#manifestUrl = options.manifestUrl;
     this.#allowedOrigins = [...(options.allowedOrigins ?? [])];
+    this.#allowInsecureHttp = options.allowInsecureHttp ?? false;
     normalizeOrigins(this.#allowedOrigins); // fail at createClient, not at the first call
     this.#transport = {
       json: async (call, signal) => {
@@ -667,6 +679,18 @@ export class CrudClient {
     const terminal = async (ctx: {
       readonly request: Request;
     }): Promise<Response> => {
+      // Judged on the request as it is sent, so a middleware that rewrites the
+      // URL or sets its own Authorization is covered too.
+      if (
+        !this.#allowInsecureHttp &&
+        ctx.request.headers.has("Authorization") &&
+        isInsecureRemote(ctx.request.url)
+      ) {
+        throw new InsecureTransportError(
+          `refusing to send credentials over plain http to ${new URL(ctx.request.url).origin}; ` +
+            "use https, or pass allowInsecureHttp: true to createClient to allow it",
+        );
+      }
       try {
         return await (this.#fetch ?? globalThis.fetch)(ctx.request);
       } catch (error) {

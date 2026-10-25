@@ -61,6 +61,20 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   (exact origins: scheme, host and port; an entry that is not an http(s)
   origin throws at `createClient`). The same rule already applies to the
   api-catalog's manifest link.
+- **Plain http.** A request that carries an `Authorization` header is
+  refused with `InsecureTransportError` (a `ClientError`, thrown before
+  anything is sent) when its URL is `http:` and the host is not loopback
+  (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`, judged on the parsed
+  hostname). The check runs on the request as it is sent, so a middleware that
+  rewrites the URL or sets its own `Authorization` is covered. Anonymous
+  requests over http are unaffected. To allow it on a trusted network, pass
+  `createClient({ baseUrl, allowInsecureHttp: true })`; the codegen CLI has
+  `--allow-insecure-http` for `CRUD_SDK_TOKEN`. On a redirect, `fetch` drops
+  `Authorization` when the target origin differs (scheme, host or port: so an
+  `https:` to `http:` downgrade drops it too, per the WHATWG Fetch
+  "HTTP-redirect fetch" step); this relies on the `fetch` you pass behaving
+  to spec. `events` streams use the `fetch` you hand to `getEventHub`, which
+  the SDK does not wrap: make that `fetch` the client's authenticated one.
 - **Operations** (each gated on the manifest's capabilities and `paths`,
   else `CapabilityError`): `list`, `iterAll`, `get`, `create`, `update`,
   `updateMany`, `delete`, `deleteMany`, `restore({ id } | { filters })`,
