@@ -96,6 +96,8 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const DEFAULT_KEEPALIVE_S = 15;
 const DEAD_AFTER_KEEPALIVES = 3;
+/** `setTimeout` clamps a longer delay to 1 ms, which would declare the stream dead at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 const ACTIONS: ReadonlySet<unknown> = new Set([
   "create",
   "update",
@@ -103,13 +105,26 @@ const ACTIONS: ReadonlySet<unknown> = new Set([
   "restore",
 ]);
 
+/**
+ * The keep-alive interval in seconds. Zero, negative and non-finite values
+ * are invalid and treated as unset, so the default applies (as the WHATWG SSE
+ * spec ignores an invalid `retry` value instead of acting on it); otherwise a
+ * dead-stream deadline of 0 would reconnect forever.
+ */
+function keepaliveSeconds(events: EventsConfig): number {
+  const value = events.keepalive_seconds;
+  return value !== undefined && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_KEEPALIVE_S;
+}
+
 /** The `events` fields that change what a hub does, with defaults applied. */
 function hubSettings(events: EventsConfig): Record<string, unknown> {
   return {
     resource: events.resource,
     resume_param: events.resume_param ?? "subscriber_id",
     replay: events.replay,
-    keepalive_seconds: events.keepalive_seconds ?? DEFAULT_KEEPALIVE_S,
+    keepalive_seconds: keepaliveSeconds(events),
   };
 }
 
@@ -274,9 +289,10 @@ class Hub {
   }
 
   private async readOnce(signal: AbortSignal): Promise<void> {
-    const keepalive = this.options.events.keepalive_seconds;
-    const deadMs =
-      (keepalive ?? DEFAULT_KEEPALIVE_S) * DEAD_AFTER_KEEPALIVES * 1000;
+    const deadMs = Math.min(
+      keepaliveSeconds(this.options.events) * DEAD_AFTER_KEEPALIVES * 1000,
+      MAX_TIMER_MS,
+    );
     const conn = new AbortController();
     const abortConn = (): void => {
       conn.abort();

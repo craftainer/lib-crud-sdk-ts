@@ -320,6 +320,49 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it.each([0, -5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "treats keepalive_seconds %s as unset: the 15 s default applies",
+    async (invalid) => {
+      vi.useFakeTimers();
+      const net = sseFetch();
+      const stop = subscribeEvents({
+        fetch: net.fn,
+        url: URL_,
+        events: { ...config, keepalive_seconds: invalid }, // default -> dead after 45 s
+        random: () => 0,
+        onEvent: () => undefined,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      net.conns[0]!.push(handshake("abc"));
+      await vi.advanceTimersByTimeAsync(44_999);
+      expect(net.conns[0]!.signal?.aborted).toBe(false);
+      expect(net.conns).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(net.conns[0]!.signal?.aborted).toBe(true);
+      stop();
+      await vi.advanceTimersByTimeAsync(0);
+    },
+  );
+
+  it("caps a huge keepalive_seconds below the timer limit instead of reconnecting at once", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: { ...config, keepalive_seconds: 1e9 },
+      random: () => 0,
+      onEvent: () => undefined,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(handshake("abc"));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(net.conns[0]!.signal?.aborted).toBe(false);
+    expect(net.conns).toHaveLength(1);
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   it("does not count a slow handler as a silent stream", async () => {
     vi.useFakeTimers();
     const net = sseFetch();
