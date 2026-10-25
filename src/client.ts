@@ -426,19 +426,37 @@ export class ResourceClient<
   }
 
   async #one<T>(call: Call, options: RequestOptions): Promise<T> {
-    return (await this.#transport.json(call, options.signal)) as T;
+    const body = await this.#transport.json(call, options.signal);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      throw new ResponseError(
+        `${call.method} ${call.url}: expected a JSON object, got ${shapeOf(body)}`,
+      );
+    }
+    return body as T;
+  }
+
+  async #many<T>(call: Call, options: RequestOptions): Promise<T[]> {
+    const body = await this.#transport.json(call, options.signal);
+    if (!Array.isArray(body)) {
+      throw new ResponseError(
+        `${call.method} ${call.url}: expected a JSON array, got ${shapeOf(body)}`,
+      );
+    }
+    return body as T[];
   }
 
   /** One page of records. */
   async list(options: ListOptions = {}): Promise<Read[]> {
-    return this.#one(this.#plan.list(options), options);
+    return this.#many(this.#plan.list(options), options);
   }
 
   /** Every record, paging with `skip += limit` until a page shorter than `limit`. */
   async *iterAll(
     options: ListOptions = {},
   ): AsyncGenerator<Read, void, undefined> {
-    const size = options.limit ?? this.resource.pagination.default_limit;
+    const { default_limit: fallback, max_limit: cap } =
+      this.resource.pagination;
+    const size = options.limit ?? Math.min(fallback, cap);
     let skip = options.skip ?? 0;
     for (;;) {
       const page = await this.list({ ...options, skip, limit: size });
@@ -526,7 +544,7 @@ export class ResourceClient<
 
   /** The server's filter metadata (`kind` instead of `value_type`). */
   async filters(options: RequestOptions = {}): Promise<JsonObject[]> {
-    return this.#one(this.#plan.filters(), options);
+    return this.#many(this.#plan.filters(), options);
   }
 
   /** Revisions of one record, newest first. */
@@ -534,7 +552,7 @@ export class ResourceClient<
     id: number,
     options: RequestOptions = {},
   ): Promise<JsonObject[]> {
-    return this.#one(this.#plan.revisions(id), options);
+    return this.#many(this.#plan.revisions(id), options);
   }
 
   /** Absolute URL of the resource's SSE stream. */
@@ -578,6 +596,17 @@ export interface ClientOptions {
    * network, as the token is readable on the wire.
    */
   readonly allowInsecureHttp?: boolean | undefined;
+}
+
+function shapeOf(body: unknown): string {
+  if (body === undefined) {
+    return "no body";
+  }
+  return body === null
+    ? "null"
+    : Array.isArray(body)
+      ? "an array"
+      : typeof body;
 }
 
 /** Discovers the manifest and hands out {@link ResourceClient}s. */

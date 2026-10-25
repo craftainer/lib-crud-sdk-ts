@@ -33,7 +33,13 @@ function setup(tokens: { current: string | null }) {
     if (request.method === "PATCH") {
       return json({ ...HERO, name: "Grace" }, { headers: { etag: '"2"' } });
     }
-    return json(HERO, { headers: { etag: '"1"' } });
+    const body =
+      request.method === "GET" &&
+      (/\/json(\?(?!.*\bid=)|$)/.test(request.url) ||
+        request.url.includes("/revisions"))
+        ? [HERO]
+        : HERO;
+    return json(body, { headers: { etag: '"1"' } });
   });
   const client = createClient({
     baseUrl: BASE,

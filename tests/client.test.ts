@@ -7,6 +7,7 @@ import {
   ManifestError,
   NotFound,
   RateLimited,
+  ResponseError,
   ServerError,
   Unauthorized,
   UnknownResourceError,
@@ -236,10 +237,14 @@ describe("request context and middleware", () => {
       return next(ctx);
     };
     const controller = new AbortController();
-    const { client } = clientFor(admin, () => json({}), {
-      middleware: [spy],
-      tokenProvider: () => "tok",
-    });
+    const { client } = clientFor(
+      admin,
+      (r) => json(r.method === "GET" && !r.url.includes("id=") ? [] : {}),
+      {
+        middleware: [spy],
+        tokenProvider: () => "tok",
+      },
+    );
     const r = await client.resource("heroes");
     await r.get(5, { signal: controller.signal });
     await r.list();
@@ -282,7 +287,11 @@ describe("request context and middleware", () => {
   });
 
   it("lets a middleware short-circuit or replace the request", async () => {
-    const { client, seen } = clientFor(admin, () => json([{ id: 1 }]));
+    const { client, seen } = clientFor(admin, (r) =>
+      json(
+        r.url.includes("id=") || r.url.endsWith("/other") ? {} : [{ id: 1 }],
+      ),
+    );
     const r = await client.resource("heroes");
     client.use((ctx, next) =>
       ctx.op === "list"
@@ -306,7 +315,7 @@ describe("auth", () => {
     );
 
   it("sends the bearer token and stays anonymous without one", async () => {
-    const { client, seen } = clientFor(admin, undefined, {
+    const { client, seen } = clientFor(admin, () => json([]), {
       tokenProvider: () => "tok",
     });
     await (await client.resource("heroes")).list();
@@ -314,7 +323,7 @@ describe("auth", () => {
       "Bearer tok",
       "Bearer tok",
     ]);
-    const anon = clientFor(admin, undefined, {
+    const anon = clientFor(admin, () => json([]), {
       tokenProvider: async () => undefined,
     });
     await (await anon.client.resource("heroes")).list();
@@ -445,18 +454,13 @@ describe("operations", () => {
     expect(await r.delete(2)).toBeUndefined();
   });
 
-  it("decodes a 204 on a JSON call as undefined", async () => {
-    const { client } = clientFor(
-      admin,
-      () => new Response(null, { status: 204 }),
-    );
-    const r = await client.resource("heroes");
-    expect(await r.get(1)).toBeUndefined();
-  });
-
   it("reaches every capability-gated endpoint", async () => {
-    const { client, seen } = clientFor(admin, () =>
-      json({ matched: 0, ids: [] }),
+    const { client, seen } = clientFor(admin, (r) =>
+      json(
+        /\/(revisions|filters)(\?|$)/.test(r.url)
+          ? []
+          : { matched: 0, ids: [] },
+      ),
     );
     const r = await client.resource("heroes");
     await r.stats({ bucket: "day" });
@@ -519,6 +523,51 @@ describe("operations", () => {
     }
     expect(out).toEqual([]);
     expect(seen.at(-1)!.url).toBe(`${BASE}${heroes}?skip=7&limit=100`);
+  });
+
+  it("caps the iterAll default page size at max_limit", async () => {
+    const doc = structuredClone(admin) as {
+      resources: Array<{
+        pagination: { default_limit: number; max_limit: number };
+      }>;
+    };
+    for (const res of doc.resources) {
+      res.pagination.default_limit = 100;
+      res.pagination.max_limit = 50;
+    }
+    const { client, seen } = clientFor(doc, () => json([]));
+    const r = await client.resource("heroes");
+    for await (const _ of r.iterAll()) {
+      // empty
+    }
+    expect(seen.at(-1)!.url).toBe(`${BASE}${heroes}?skip=0&limit=50`);
+  });
+
+  it("throws a ResponseError for a 204, empty or wrongly shaped body on typed calls", async () => {
+    const cases: Array<[Response, string]> = [
+      [new Response(null, { status: 204 }), "object"],
+      [json([{ id: 1 }]), "object"],
+      [json("x"), "object"],
+      [json(null), "object"],
+      [new Response(null, { status: 204 }), "array"],
+      [json({ id: 1 }), "array"],
+    ];
+    for (const [response, shape] of cases) {
+      const { client } = clientFor(admin, () => response.clone());
+      const r = await client.resource("heroes");
+      const call = shape === "object" ? r.get(1) : r.list();
+      await expect(call).rejects.toThrow(ResponseError);
+      await expect(call).rejects.toThrow(`expected a JSON ${shape}`);
+    }
+  });
+
+  it("still accepts a 204 on a single-record delete", async () => {
+    const { client } = clientFor(
+      admin,
+      () => new Response(null, { status: 204 }),
+    );
+    const r = await client.resource("heroes");
+    await expect(r.delete(1)).resolves.toBeUndefined();
   });
 
   it("sends only_archived=true on list and iterAll, and throws before a request on a conflict", async () => {
@@ -706,7 +755,9 @@ describe("manifest URLs stay on baseUrl's origin", () => {
       r.base_path = `${BASE}/x/heroes`;
       r.paths.stats = "../up/stats";
     });
-    const { client, seen } = clientFor(doc);
+    const { client, seen } = clientFor(doc, (r) =>
+      json(r.url.endsWith("/stats") ? {} : []),
+    );
     const h = await client.resource("heroes");
     await h.list();
     await h.stats();
