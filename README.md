@@ -150,6 +150,16 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
 - A `keepalive_seconds` that is zero, negative or not finite is treated as
   unset: the 15 s default applies (a stream silent for three intervals is dead).
 - Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
+  `IndexedDbStore` keeps an `expiresAt` index (database version 2; a version 1
+  database upgrades in place and keeps its entries), deletes every expired
+  entry once when it opens the database, and takes an optional
+  `maxEntries` (a positive integer, default unbounded): a `set` that leaves
+  more entries than that deletes the ones with the earliest `expiresAt` until
+  the cap holds, a just-written short-ttl entry included. Without
+  `maxEntries` nothing but the open-time sweep and per-read expiry removes
+  entries. An older release of the package cannot open a version 2 database
+  (the browser refuses to downgrade); give the new release a fresh `name` if
+  both must coexist.
   `clearMany(prefixes)` is optional on a custom `CacheStore`.
 - `cacheStatus(response)` says `hit`, `stale`, `revalidated` or `miss`;
   `cache.close()` stops background refreshes.
