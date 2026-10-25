@@ -8,7 +8,7 @@ import {
   manifestUrlFromCatalog,
   parseManifest,
 } from "../src/index.ts";
-import type { Manifest } from "../src/index.ts";
+import type { Manifest, Resource } from "../src/index.ts";
 import { fixture } from "./_support.ts";
 
 const admin = fixture("admin.manifest.json") as Record<string, any>;
@@ -153,6 +153,19 @@ describe("findResource", () => {
     expect(findResource(manifest, "heroes", "next")?.api_version).toBe("next");
     expect(findResource(manifest, "heroes", "v9")).toBeUndefined();
     expect(findResource(manifest, "nope")).toBeUndefined();
+  });
+
+  it("ranks only the spec's v<N> numerically", () => {
+    const resource = (api_version: string) =>
+      ({ name: "heroes", api_version }) as Resource;
+    const pick = (...versions: string[]) =>
+      findResource(
+        { resources: versions.map(resource) } as unknown as Manifest,
+        "heroes",
+      )?.api_version;
+    expect(pick("v2beta", "v1")).toBe("v1"); // suffixed: not a version number
+    expect(pick("x5", "v1")).toBe("v1"); // wrong prefix
+    expect(pick("v1", "v02")).toBe("v02");
   });
 
   it("ranks a non numeric version lowest", () => {

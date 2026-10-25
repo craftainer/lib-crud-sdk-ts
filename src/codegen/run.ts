@@ -54,7 +54,7 @@ async function readManifest(
   allowInsecureHttp: boolean,
   deps: Deps,
 ): Promise<Manifest> {
-  if (!/^https?:\/\//.test(source)) {
+  if (!/^https?:\/\//i.test(source)) {
     const text = await (deps.readFile ?? ((p) => readFile(p, "utf8")))(source);
     return parseManifest(JSON.parse(text));
   }

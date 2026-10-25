@@ -36,7 +36,8 @@ export interface EventsConfig {
   readonly resource: string;
   readonly path?: string;
   readonly resume_param?: string;
-  readonly replay?: "persistent" | "none";
+  /** `persistent` resumes by subscriber id; anything else (`none`) does not. A plain string, as on the wire. */
+  readonly replay?: string;
   readonly keepalive_seconds?: number;
 }
 
@@ -236,8 +237,12 @@ class Hub {
   private async fan(
     call: (handlers: EventHandlers) => MaybePromise<void> | undefined,
   ): Promise<void> {
+    // A snapshot, so a subscriber added during dispatch waits for the next
+    // one; one removed meanwhile (its unsubscribe already ran) is skipped.
     for (const handlers of Array.from(this.handlers)) {
-      await this.guard(() => call(handlers));
+      if (this.handlers.has(handlers)) {
+        await this.guard(() => call(handlers));
+      }
     }
   }
 

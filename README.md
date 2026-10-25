@@ -51,7 +51,9 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
 
 - **Discovery.** The manifest loads on first use through
   `/.well-known/api-catalog` (the `describedby` link with the manifest
-  profile), or from `manifestUrl`. Manifest types keep the wire member names
+  profile), or from `manifestUrl`. `client.manifest({ refresh: true })`
+  reloads it; if the reload fails the error is thrown and the last good
+  manifest stays cached. Manifest types keep the wire member names
   (`skip_param`, `max_age`, ...) and ignore unknown members.
 - **Same origin.** The client sends the token to every URL it builds, so a
   manifest `base_path`, `paths.*` or `events.path` that resolves to another
