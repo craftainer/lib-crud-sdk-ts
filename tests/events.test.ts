@@ -320,6 +320,39 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it("does not count a slow handler as a silent stream", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const seen: string[] = [];
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config, // keepalive 10 s -> dead after 30 s
+      random: () => 0,
+      onEvent: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40_000));
+        seen.push("event done");
+      },
+      onStatus: (connected) => {
+        seen.push(`status:${connected}`);
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(handshake("abc"));
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(frame(1, record("update", 1)));
+    await vi.advanceTimersByTimeAsync(40_000); // the handler outlasts the dead timer
+    expect(seen).toEqual(["status:true", "event done"]);
+    expect(net.conns[0]!.signal?.aborted).toBe(false);
+    expect(net.conns).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(29_999); // the timer restarts after the handler
+    expect(net.conns[0]!.signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(net.conns[0]!.signal?.aborted).toBe(true);
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
   it("uses a 15 s keep-alive when the manifest gives none", async () => {
     vi.useFakeTimers();
     const net = sseFetch();

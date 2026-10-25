@@ -257,9 +257,13 @@ class Hub {
         }
         arm(); // any byte, keep-alive comments included, proves the stream is alive
         parser.feed(decoder.decode(value, { stream: true }));
+        // Handlers may be slow and nothing is read meanwhile, so the silence
+        // timer must not run while they do; it restarts once they are done.
+        clearTimeout(timer);
         for (const message of pending.splice(0)) {
           await this.handle(message);
         }
+        arm();
       }
     } finally {
       clearTimeout(timer);
