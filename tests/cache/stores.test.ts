@@ -1,4 +1,6 @@
 import "fake-indexeddb/auto";
+import { openDB } from "idb";
+import type { IDBPDatabase } from "idb";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { IndexedDbStore, MemoryStore } from "../../src/cache/index.ts";
 import type { CacheEntry, CacheStore } from "../../src/interfaces.ts";
@@ -226,5 +228,194 @@ describe("IndexedDbStore", () => {
     (failing as unknown as { opening: Promise<never> }).opening =
       Promise.reject(new Error("never opened"));
     await failing.close();
+  });
+
+  it("rejects a maxEntries that is not a positive integer", () => {
+    for (const maxEntries of [0, -1, 1.5, Number.NaN, Infinity]) {
+      expect(() => new IndexedDbStore({ name: "t-max", maxEntries })).toThrow(
+        RangeError,
+      );
+    }
+  });
+
+  describe("expiry sweep and the version 2 index", () => {
+    const stored = (expiresAt: number, body: string) => ({
+      expiresAt,
+      entry: entry(body),
+    });
+
+    it("upgrades a version 1 database in place, keeping its entries", async () => {
+      const v1 = await openDB("t-v1", 1, {
+        upgrade(db) {
+          db.createObjectStore("entries");
+        },
+      });
+      await v1.put("entries", stored(5000, "live"), "live");
+      await v1.put("entries", stored(100, "dead"), "dead");
+      v1.close();
+      const store = new IndexedDbStore({ name: "t-v1", now: () => 1000 });
+      expect((await store.get("live"))?.body).toBe("live");
+      expect(await store.get("dead")).toBeUndefined();
+      await store.close();
+      const v2 = await openDB("t-v1");
+      expect(v2.version).toBe(2);
+      const tx = v2.transaction("entries");
+      expect(Array.from(tx.store.indexNames)).toEqual(["expiresAt"]);
+      expect(await tx.store.index("expiresAt").getAllKeys()).toEqual(["live"]);
+      v2.close();
+    });
+
+    it("creates the index on a fresh database and reopens a version 2 one", async () => {
+      const first = new IndexedDbStore({ name: "t-v2" });
+      await first.set("k", entry("a"));
+      await first.close();
+      const second = new IndexedDbStore({ name: "t-v2" }); // no upgrade this time
+      expect((await second.get("k"))?.body).toBe("a");
+      await second.close();
+    });
+
+    it("sweeps expired entries once on first open, boundary included", async () => {
+      let t = 1000;
+      const writer = new IndexedDbStore({ name: "t-sweep", now: () => t });
+      await writer.set("expired", entry("a"), 10);
+      await writer.set("boundary", entry("b"), 20);
+      await writer.set("live", entry("c"), 21);
+      await writer.close();
+      t = 1020; // "expired" is past, "boundary" expires exactly now
+      const reader = new IndexedDbStore({ name: "t-sweep", now: () => t });
+      await reader.clear("nothing"); // any call opens (and sweeps)
+      await reader.close();
+      const raw = await openDB("t-sweep");
+      expect(await raw.getAllKeys("entries")).toEqual(["live"]);
+      raw.close();
+    });
+
+    it("sweeps only when it opens, not on every call", async () => {
+      let t = 1000;
+      const store = new IndexedDbStore({ name: "t-sweep-once", now: () => t });
+      await store.set("short", entry("a"), 10);
+      t = 2000;
+      const raw = await openDB("t-sweep-once");
+      expect(await raw.count("entries")).toBe(1); // still there: no call has swept yet
+      await store.set("other", entry("b"));
+      expect(await raw.count("entries")).toBe(2); // the open handle did not sweep again
+      raw.close();
+      await store.close();
+    });
+
+    it("keeps working when the sweep fails", async () => {
+      const bound = vi
+        .spyOn(
+          (
+            globalThis as unknown as {
+              IDBKeyRange: { upperBound: () => unknown };
+            }
+          ).IDBKeyRange,
+          "upperBound",
+        )
+        .mockImplementation(() => {
+          throw new Error("no sweep");
+        });
+      const store = new IndexedDbStore({ name: "t-sweep-fails" });
+      await store.set("k", entry("a"));
+      expect((await store.get("k"))?.body).toBe("a");
+      expect(bound).toHaveBeenCalledTimes(1);
+      await store.close();
+    });
+  });
+
+  describe("maxEntries", () => {
+    it("is unbounded by default", async () => {
+      const store = new IndexedDbStore({ name: "t-unbounded" });
+      for (let i = 0; i < 50; i += 1) {
+        await store.set(`k${i}`, entry("x"));
+      }
+      const raw = await openDB("t-unbounded");
+      expect(await raw.count("entries")).toBe(50);
+      raw.close();
+      await store.close();
+    });
+
+    it("evicts the entries with the earliest expiresAt once over the cap", async () => {
+      let t = 0;
+      const store = new IndexedDbStore({
+        name: "t-cap",
+        maxEntries: 3,
+        now: () => t,
+        defaultTtlMs: 1000,
+      });
+      await store.set("a", entry("a"), 500);
+      await store.set("b", entry("b"), 100); // earliest expiry
+      await store.set("c", entry("c"), 900);
+      await store.set("d", entry("d"), 800); // 4 entries: evicts b
+      expect(await store.get("b")).toBeUndefined();
+      for (const key of ["a", "c", "d"]) {
+        expect(await store.get(key)).toBeDefined();
+      }
+      await store.set("e", entry("e"), 50); // evicts itself, the earliest
+      expect(await store.get("e")).toBeUndefined();
+      await store.set("a", entry("a2"), 500); // overwrite: still 3, nothing evicted
+      expect((await store.get("c"))?.body).toBe("c");
+      expect((await store.get("a"))?.body).toBe("a2");
+      await store.close();
+    });
+
+    it("evicts several at once when the cap is lowered below the stored count", async () => {
+      const wide = new IndexedDbStore({ name: "t-cap-lower" });
+      for (const key of ["a", "b", "c", "d"]) {
+        await wide.set(key, entry(key), 1000 + key.charCodeAt(0));
+      }
+      await wide.close();
+      const narrow = new IndexedDbStore({ name: "t-cap-lower", maxEntries: 1 });
+      await narrow.set("e", entry("e"), 10_000_000);
+      const raw = await openDB("t-cap-lower");
+      expect(await raw.getAllKeys("entries")).toEqual(["e"]);
+      raw.close();
+      await narrow.close();
+    });
+  });
+
+  it("yields to a newer version that wants to upgrade, and misses until then", async () => {
+    const store = new IndexedDbStore({ name: "t-blocking" });
+    await store.set("k", entry("a"));
+    // A second, newer handle of the same store (the first was dropped elsewhere).
+    (store as unknown as { opening: undefined }).opening = undefined;
+    await store.set("k2", entry("b"));
+    const newer = await openDB("t-blocking", 3); // fires `blocking` on our handle
+    expect(await store.get("k")).toBeUndefined(); // reopening at version 2 fails: a miss
+    newer.close();
+    await store.close();
+  });
+
+  it("does not leave an unhandled rejection when a write aborts its transaction", async () => {
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    const store = new IndexedDbStore({ name: "t-abort", maxEntries: 2 });
+    await store.set("ok", entry("a"));
+    const handle = await (
+      store as unknown as { opening: Promise<IDBPDatabase> }
+    ).opening;
+    const transaction = handle.transaction.bind(handle);
+    vi.spyOn(handle, "transaction").mockImplementation(((
+      ...args: Parameters<typeof transaction>
+    ) => {
+      const tx = transaction(...args);
+      return new Proxy(tx, {
+        get: (target, prop) =>
+          prop === "store"
+            ? {
+                put: () => {
+                  target.abort(); // like a QuotaExceededError
+                  return Promise.reject(new Error("quota"));
+                },
+              }
+            : Reflect.get(target, prop),
+      });
+    }) as never);
+    await expect(store.set("bad", entry("b"))).resolves.toBeUndefined();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    process.off("unhandledRejection", unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+    await store.close();
   });
 });
