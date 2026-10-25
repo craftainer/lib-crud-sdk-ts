@@ -202,8 +202,16 @@ the failed jobs, which then runs it.
 
 Two runs for the same tag cannot overlap in the `release` job: it sits in a
 `concurrency` group named after the tag (`cancel-in-progress: false`), so the
-second waits and then sees the published release. GitHub keeps at most one
-waiting run per group, and a newer waiting run replaces it.
+second waits and then sees the published release. If that release was cut
+from a different commit than the waiting run's (two dispatches that computed
+the same tag), the waiting run fails instead of publishing its own `dist/`
+under that version (detected only here, after the per-arch images of both runs were
+pushed). GitHub keeps at most one waiting run per group, and a
+newer waiting run replaces it.
+
+Re-run only the *failed jobs* of a run. "Re-run all jobs" runs `version`
+again, which sees the tag the first attempt created and computes the next
+version, so it cuts another release instead of finishing the first.
 
 In `release-check`, if `dist/` holds files owned by another user (the
 devcontainer ran as root), the job takes them over with `sudo`, which must
@@ -282,6 +290,15 @@ with the result. It never pushes directly or auto-merges; a genuine
 resolve. An instance that predates this workflow bootstraps its
 `.github/template-sync-state.json` via the workflow's manual
 `initial_sync_tag`/`template_repo` inputs first.
+
+The workflow runs `template_sync.py apply` from the *new* tag's checkout,
+with that tag's manifest. Do the same when applying a sync by hand: the
+instance's own copy of the script is the old release's, and an older one
+does not expand glob entries such as `scripts/release-*.sh`, so it skips
+those files (a second run with the new script then picks them up). `apply`
+is meant to run once per tag pair: the state file moves to the new tag
+afterwards. Running it again is harmless for files already merged cleanly,
+but it merges a hand-resolved conflict again and re-creates its markers.
 
 An instance that isn't itself a template shouldn't edit that manifest to
 list its own files (`src/`, say): it's `merge`-tier, so edits would
@@ -485,9 +502,12 @@ manual run; in CI an unset variable means the whole job is skipped. The job
 runs once, not per arch, and holds `id-token: write`; the per-arch `build`
 job has neither that nor the token.
 Before any stage or publish it checks, with `check_repository` in
-`scripts/release-lib.sh`, that the tarball's `repository.url` (`git+` prefix,
-`.git` suffix and trailing slash stripped, case-sensitive) equals
-`https://github.com/$GITHUB_REPOSITORY`, because npm's provenance
+`scripts/release-lib.sh`, that the tarball's `repository` names
+`https://github.com/$GITHUB_REPOSITORY` (case-sensitive). Every GitHub form npm
+accepts passes: the `owner/repo` and `github:owner/repo` shorthands,
+`[git+]https://`, `git://`, `[git+]ssh://` and `git@github.com:owner/repo`
+URLs, with or without `.git` and a trailing slash; another host, extra path
+segments or a `#ref` do not. This is checked because npm's provenance
 verification rejects any other value (E422); it is skipped with a notice
 when `GITHUB_REPOSITORY` is unset (a local run), and it only runs when
 `NPM_PUBLISH` is set. `npm_config_dry_run=true` turns either path into a
@@ -532,13 +552,15 @@ fails loudly at `publish-packages` when `NPM_PUBLISH` is set.
 trusted publishing breaks if it is present. `publish-packages` unsets it
 defensively; never map `NPM_TOKEN` to it in a workflow.
 
-**`release-check`** always installs the `dist/` tarball into a scratch
-project and imports every `exports` entry (ESM, Node), checking the
-installed version. When `NPM_PUBLISH` is set it then looks the version up
-with `npm view`: if found it is installed from the registry and imported
-too; if not, it prints a "not yet on the registry (staged, awaiting
-approval?)" notice and passes, because a staged release is not installable
-until approved. "Not found" is both an E404 and `npm view` exiting 0 with
+**`release-check`** installs the `dist/` tarball into a scratch project and
+imports every `exports` entry (ESM, Node), checking the installed version.
+**`verify-published`** (when `NPM_PUBLISH` is set) looks the version up with
+`npm view`, retrying for registry propagation: if found it is installed from
+the registry and imported too; if it never appears, the script fails with an
+error, because a release whose package did not appear must not pass. That
+includes a staged first release that is not approved yet: approve it
+(`npm stage approve <stage-id>`) and re-run the `verify-published` job.
+"Not found" is both an E404 and `npm view` exiting 0 with
 empty output (the package exists, that version does not). Any other lookup
 failure (network, auth) fails the check.
 The template itself never publishes (`NPM_PUBLISH` unset) but its release
