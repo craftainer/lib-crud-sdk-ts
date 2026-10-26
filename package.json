@@ -2,7 +2,7 @@
   "name": "@craftainer/crud-sdk",
   "version": "0.0.0",
   "description": "Typed fetch client for craftainer CRUD APIs: manifest-driven resources, query builder, problem-details errors, opt-in cache with SSE invalidation and TanStack Query helpers.",
-  "license": "GPL-3.0-or-later",
+  "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/craftainer/lib-crud-sdk-ts.git"
