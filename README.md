@@ -113,6 +113,11 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
 - **Middleware.** `createClient({ middleware })` or `client.use(mw)` (added
   innermost). Each request carries a `RequestContext` (`resource`, `op`,
   `recordId`, `scope`, `apiVersion`, `signal`).
+- **Response shape.** A call that expects an object or array and gets a `204`,
+  an empty body or JSON of the wrong shape throws `ResponseError`, as a body
+  that is not JSON does. `client.resource("heroes")` picks the highest
+  `api_version` by its number (`v<N>`); a value that does not match `v<N>`
+  ranks lowest.
 - **Typed records.** `client.resource<Read, Create, Update>("heroes")` takes
   the interfaces written by the codegen below (not checked at runtime).
 
@@ -145,13 +150,18 @@ objects, snake_case members).
 - Every read revalidates (`If-None-Match`, `304` rebuilt from the store).
   `max_age`/`stale_while_revalidate` freshness applies only while the
   resource's SSE stream is connected, never with `cache.revalidate_only`.
+  A stale-while-revalidate background request inherits the caller's `fetch`
+  init except `cache`, which it forces to `"no-store"` (an inherited
+  `force-cache` or `only-if-cached` would skip the server).
   Every connection clears the resource once per cache, including for a
   subscription that joins an already connected stream, which clears before
   its gate opens.
 - A write clears what it touches when it succeeds. A write whose outcome is
   unknown (the request threw, or the answer was `5xx`) clears the same, since
   the server may have applied it; a refused write (any other status below `500`) clears
-  nothing, except `412`, which evicts the record. A bulk write of unknown outcome clears
+  nothing, except `412`, `404` and `410`, which evict the record's cached reads
+  (its entry and its revisions): the server says the record changed or is gone,
+  as a read answered `404`/`410` does. A bulk write of unknown outcome clears
   the whole resource, as its ids are not known. A write aborted before it
   was sent clears nothing.
 - Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
