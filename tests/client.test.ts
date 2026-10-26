@@ -812,4 +812,19 @@ describe("manifest URLs stay on baseUrl's origin", () => {
       ).toThrow(/allowedOrigins/);
     }
   });
+
+  it("sends include_unpublished on deleteMany only when given", async () => {
+    const { client, seen } = clientFor(admin, () =>
+      json({ matched: 0, ids: [] }),
+    );
+    const r = await client.resource("heroes");
+    await r.deleteMany({ name: "x" });
+    await r.deleteMany({ name: "x" }, { includeUnpublished: false });
+    await r.deleteMany({ name: "x" }, { includeUnpublished: true });
+    expect(seen.slice(-3).map((s) => new URL(s.url).search)).toEqual([
+      "?name=x",
+      "?name=x&include_unpublished=false",
+      "?name=x&include_unpublished=true",
+    ]);
+  });
 });

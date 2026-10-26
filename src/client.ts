@@ -44,6 +44,11 @@ export interface WriteOptions extends RequestOptions {
   readonly ifMatch?: string | undefined;
 }
 
+/** Options of `deleteMany`. */
+export interface DeleteManyOptions extends RequestOptions {
+  readonly includeUnpublished?: boolean | undefined;
+}
+
 /** Options of `stats`. There is no `onlyArchived` (the server rejects it on `/stats`). */
 export interface StatsOptions extends RequestOptions {
   readonly bucket?: string | undefined;
@@ -204,11 +209,14 @@ class Plan {
     }
   }
 
-  #bulkFilters(filters: Filters): string {
+  #bulkFilters(
+    filters: Filters,
+    includeUnpublished?: boolean | undefined,
+  ): string {
     if (Object.keys(filters).length === 0) {
       throw new InvalidQueryError("a bulk operation needs at least one filter");
     }
-    return this.#query({ filters });
+    return this.#query({ filters, includeUnpublished });
   }
 
   get #base(): string {
@@ -294,13 +302,13 @@ class Plan {
     );
   }
 
-  deleteMany(filters: Filters): Call {
+  deleteMany(filters: Filters, includeUnpublished?: boolean | undefined): Call {
     this.#need(this.resource.capabilities.bulk_delete, "bulk_delete");
     return this.#call(
       "DELETE",
       "bulk_delete",
       this.#base,
-      this.#bulkFilters(filters),
+      this.#bulkFilters(filters, includeUnpublished),
     );
   }
 
@@ -504,12 +512,19 @@ export class ResourceClient<
     );
   }
 
-  /** Deletes every record matching `filters`. */
+  /**
+   * Deletes every record matching `filters`. `includeUnpublished: false`
+   * leaves not-yet/no-longer-published rows alone; it is sent only when
+   * given (needs a server with the BD1 bulk-delete support, older ones ignore it).
+   */
   async deleteMany(
     filters: Filters,
-    options: RequestOptions = {},
+    options: DeleteManyOptions = {},
   ): Promise<BulkResult> {
-    return this.#one(this.#plan.deleteMany(filters), options);
+    return this.#one(
+      this.#plan.deleteMany(filters, options.includeUnpublished),
+      options,
+    );
   }
 
   /** Restores archived records, by `id` or by `filters`. */
