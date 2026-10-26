@@ -104,7 +104,9 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
 - **Bulk delete and unpublished rows.** `deleteMany(filters, { includeUnpublished })`
   sends `include_unpublished=<true|false>` only when the option is given;
   `false` leaves not-yet/no-longer-published rows alone. It requires
-  lib-crud-py with BD1; older servers ignore it.
+  lib-crud-py with BD1 (`include_unpublished` on bulk `DELETE`); an older
+  server ignores it and still deletes unpublished rows, so do not rely on
+  `false` against one.
 - **Errors.** `ProblemError` (RFC 9457) with subclasses `BadRequest`,
   `Unauthorized`, `Forbidden`, `NotFound`, `PreconditionFailed`,
   `ValidationFailed` (`errors`), `Locked`, `RateLimited` (`retryAfter`),
