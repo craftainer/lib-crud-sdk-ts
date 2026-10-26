@@ -101,6 +101,10 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   or `get`); a non-archivable resource ignores it. The wire query is part of
   the HTTP cache key, and in the TanStack layer put it in the list query (`listOptions(ns, "heroes", api, { onlyArchived: true })`), so
   archived-only and normal lists never share a cache entry.
+- **Bulk delete and unpublished rows.** `deleteMany(filters, { includeUnpublished })`
+  sends `include_unpublished=<true|false>` only when the option is given;
+  `false` leaves not-yet/no-longer-published rows alone. It requires
+  lib-crud-py with BD1; older servers ignore it.
 - **Errors.** `ProblemError` (RFC 9457) with subclasses `BadRequest`,
   `Unauthorized`, `Forbidden`, `NotFound`, `PreconditionFailed`,
   `ValidationFailed` (`errors`), `Locked`, `RateLimited` (`retryAfter`),

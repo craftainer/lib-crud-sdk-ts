@@ -17,6 +17,7 @@ export { CrudClient, ResourceClient, createClient } from "./client.ts";
 export type {
   BulkResult,
   ClientOptions,
+  DeleteManyOptions,
   ListOptions,
   PredictOptions,
   RequestOptions,
