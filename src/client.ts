@@ -1,5 +1,5 @@
 /** Fetch client: manifest-driven resource handles over a middleware chain. */
-import { cacheScope, isInsecureRemote } from "./auth.ts";
+import { cacheScope as tokenScope, isInsecureRemote } from "./auth.ts";
 import {
   CapabilityError,
   ClientError,
@@ -584,6 +584,38 @@ export interface ClientOptions {
   readonly fetch?: typeof fetch | undefined;
   /** Returns the bearer token; called again with `refresh: true` once after a `401`. */
   readonly tokenProvider?: TokenProvider | undefined;
+  /**
+   * The cache scope of the caller, for sessions that carry no bearer token
+   * (a cookie session behind a BFF). A string, or a function (sync or async)
+   * evaluated per request (and reused across that request's 401 retry), plus
+   * once per `scope()` call; return the same value for the same caller (for example the OIDC `sub`). It must be non-empty. When given it
+   * REPLACES the token-hash / `"anon"` scope, even if a `tokenProvider` is also
+   * set (the token still authenticates; it no longer selects the scope), and
+   * the `./cache` middleware keys by it instead of the Authorization header.
+   * Change what it returns on login or logout and nothing cached for the
+   * previous caller is visible.
+   */
+  readonly cacheScope?: string | (() => string | Promise<string>) | undefined;
+  /**
+   * Passed to every `fetch` as `RequestInit.credentials` (`"same-origin"`
+   * sends the session cookie to a same-origin `baseUrl`). Default: the
+   * platform's (`"same-origin"`). `"include"` over plain `http:` to a
+   * non-loopback host is refused with {@link InsecureTransportError}.
+   */
+  readonly credentials?: NonNullable<RequestInit["credentials"]> | undefined;
+  /**
+   * Called (and awaited) on each final `401` response, after the
+   * `tokenProvider` refresh retry (if any) has failed to help; manifest and
+   * discovery requests included. A client call that makes several requests
+   * can fire it more than once, so make it idempotent (for example a
+   * navigation). It gets a clone of the response, so its body may be read.
+   * The call still rejects with `Unauthorized` afterwards; if the callback
+   * throws, its error is the `Unauthorized`'s `cause` (or, when the problem
+   * already has a `cause`, a non-enumerable `onUnauthorizedError` property).
+   * Typical use: navigate to the login page.
+   */
+  readonly onUnauthorized?:
+    ((response: Response) => void | Promise<void>) | undefined;
   /** Outermost first; see `composeMiddleware`. */
   readonly middleware?: readonly Middleware[] | undefined;
   /** Skips api-catalog discovery. */
@@ -603,11 +635,12 @@ export interface ClientOptions {
    */
   readonly allowedOrigins?: readonly string[] | undefined;
   /**
-   * Allow sending an `Authorization` header (the bearer token) over plain
-   * `http:` to a host that is not loopback. Default `false`: such a request
-   * is refused with {@link InsecureTransportError} before it is sent.
+   * Allow sending an `Authorization` header (the bearer token), or cookies
+   * (`credentials: "include"`), over plain `http:` to a
+   * host that is not loopback. Default `false`: such a request is refused
+   * with {@link InsecureTransportError} before it is sent.
    * Loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`) and
-   * anonymous requests are always allowed. Opt in only for a trusted
+   * anonymous requests without credentials are always allowed. Opt in only for a trusted
    * network, as the token is readable on the wire.
    */
   readonly allowInsecureHttp?: boolean | undefined;
@@ -631,6 +664,9 @@ export class CrudClient {
   readonly id: string;
   readonly #fetch: typeof fetch | undefined;
   readonly #tokenProvider: TokenProvider | undefined;
+  readonly #cacheScope: ClientOptions["cacheScope"];
+  readonly #credentials: NonNullable<RequestInit["credentials"]> | undefined;
+  readonly #onUnauthorized: ClientOptions["onUnauthorized"];
   readonly #middleware: Middleware[];
   readonly #manifestUrl: string | undefined;
   readonly #allowedOrigins: readonly string[];
@@ -645,6 +681,9 @@ export class CrudClient {
     this.id = options.id ?? options.baseUrl;
     this.#fetch = options.fetch;
     this.#tokenProvider = options.tokenProvider;
+    this.#cacheScope = options.cacheScope;
+    this.#credentials = options.credentials;
+    this.#onUnauthorized = options.onUnauthorized;
     this.#middleware = [...(options.middleware ?? [])];
     this.#manifestUrl = options.manifestUrl;
     this.#allowedOrigins = [...(options.allowedOrigins ?? [])];
@@ -687,9 +726,35 @@ export class CrudClient {
     return this.#token(refresh);
   }
 
-  /** The cache scope of the current caller (`"anon"` or a hash of the token). */
+  /**
+   * The `cacheScope` option, evaluated once, validated and namespaced
+   * (`s:` + the percent-encoded value, so it can never equal `anon` or a token
+   * hash and adds no key segments); `undefined` when the option is not used.
+   * The prefix is internal.
+   */
+  async #explicitScope(): Promise<string | undefined> {
+    if (this.#cacheScope === undefined) {
+      return undefined;
+    }
+    const value: unknown =
+      typeof this.#cacheScope === "function"
+        ? await this.#cacheScope()
+        : this.#cacheScope;
+    if (typeof value !== "string" || value === "") {
+      throw new ClientError("cacheScope must resolve to a non-empty string");
+    }
+    return `s:${encodeURIComponent(value)}`;
+  }
+
+  /**
+   * The cache scope of the current caller: the `cacheScope` option (opaque,
+   * namespaced; the `tokenProvider` is not called), else `"anon"` or a hash of
+   * the token.
+   */
   async scope(): Promise<string> {
-    return cacheScope(await this.#token(false));
+    return (
+      (await this.#explicitScope()) ?? tokenScope(await this.#token(false))
+    );
   }
 
   /** The `{ client, scope }` namespace the `./tanstack` key factory takes. */
@@ -703,6 +768,7 @@ export class CrudClient {
   async #dispatch(
     call: Call,
     token: string | null,
+    explicit: string | undefined,
     signal: AbortSignal | undefined,
   ): Promise<Response> {
     const headers = new Headers({
@@ -716,6 +782,9 @@ export class CrudClient {
       method: call.method,
       headers,
       signal: signal ?? null,
+      ...(this.#credentials === undefined
+        ? {}
+        : { credentials: this.#credentials }),
     };
     if (call.json !== undefined) {
       headers.set("Content-Type", "application/json");
@@ -729,11 +798,12 @@ export class CrudClient {
       // URL or sets its own Authorization is covered too.
       if (
         !this.#allowInsecureHttp &&
-        ctx.request.headers.has("Authorization") &&
+        (ctx.request.headers.has("Authorization") ||
+          this.#credentials === "include") &&
         isInsecureRemote(ctx.request.url)
       ) {
         throw new InsecureTransportError(
-          `refusing to send credentials over plain http to ${new URL(ctx.request.url).origin}; ` +
+          `refusing to send credentials (an Authorization header or cookies) over plain http to ${new URL(ctx.request.url).origin}; ` +
             "use https, or pass allowInsecureHttp: true to createClient to allow it",
         );
       }
@@ -759,7 +829,8 @@ export class CrudClient {
       resource: call.resource,
       op: call.op,
       recordId: call.recordId,
-      scope: await cacheScope(token),
+      scope: explicit ?? (await tokenScope(token)),
+      ...(explicit === undefined ? {} : { cacheScope: explicit }),
       apiVersion: call.apiVersion,
       signal,
     });
@@ -767,17 +838,42 @@ export class CrudClient {
 
   /** Sends `call`, retrying once with a refreshed token after a `401`; throws on `>= 400`. */
   async #send(call: Call, signal: AbortSignal | undefined): Promise<Response> {
+    const explicit = await this.#explicitScope(); // once per call, reused on the retry
     const token = await this.#token(false);
-    let response = await this.#dispatch(call, token, signal);
+    let response = await this.#dispatch(call, token, explicit, signal);
     if (response.status === 401 && this.#tokenProvider !== undefined) {
       const fresh = await this.#token(true);
       if (fresh !== null && fresh !== token) {
         await response.body?.cancel();
-        response = await this.#dispatch(call, fresh, signal);
+        response = await this.#dispatch(call, fresh, explicit, signal);
+      }
+    }
+    let callbackError: unknown;
+    let callbackFailed = false;
+    if (response.status === 401 && this.#onUnauthorized !== undefined) {
+      try {
+        await this.#onUnauthorized(response.clone());
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
       }
     }
     if (response.status >= 400) {
-      throw await problemFromResponse(response);
+      const problem = await problemFromResponse(response);
+      if (callbackFailed) {
+        if (problem.cause === undefined) {
+          problem.cause = callbackError;
+        } else {
+          // Keep the cause the problem already has; expose the callback's error here.
+          Object.defineProperty(problem, "onUnauthorizedError", {
+            value: callbackError,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        }
+      }
+      throw problem;
     }
     return response;
   }

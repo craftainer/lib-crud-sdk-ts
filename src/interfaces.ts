@@ -81,6 +81,15 @@ export interface RequestContext {
    */
   readonly scope: string;
   /**
+   * Set by the client only when `createClient({ cacheScope })` is used: the
+   * caller scope the cache keys by (opaque and key-safe, internally
+   * namespaced; it equals `scope`). When absent the cache derives the scope
+   * from the Authorization header. A middleware that builds a new context must
+   * carry it through (`{ ...ctx, request }`), or the cache falls back to the
+   * header scope.
+   */
+  readonly cacheScope?: string;
+  /**
    * The resource's `api_version` from the manifest, or `null` when it has
    * none. Part of the cache key, so versions never share entries (the cache
    * layer renders `null` as `_`).
