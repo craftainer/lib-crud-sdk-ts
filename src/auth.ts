@@ -4,6 +4,16 @@ import type { TokenProvider } from "./interfaces.ts";
 export const ANON = "anon";
 
 /**
+ * Internal marker (a symbol-keyed property on the `RequestContext`, which
+ * survives `{ ...ctx }`): the client sets it when `scope` came from the
+ * `cacheScope` option, and the cache then keys by `ctx.scope` instead of the
+ * Authorization header. Not part of the public API.
+ */
+export const EXPLICIT_SCOPE: unique symbol = Symbol.for(
+  "@craftainer/crud-sdk/explicit-scope",
+);
+
+/**
  * Cache scope of a caller: `"anon"`, or the first 32 hex characters of the
  * SHA-256 of the whole bearer token. Nothing in the token is trusted or
  * decoded (a forged `sub` must not select another caller's entries), and the

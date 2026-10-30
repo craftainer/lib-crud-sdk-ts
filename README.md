@@ -116,6 +116,41 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   called once with `{ refresh: true }` and the request is retried only if
   the token changed. The cache scope is `"anon"` or the first 32 hex of the
   SHA-256 of the whole token (never decoded).
+- **Cookie sessions (BFF).** With no bearer token in the browser, set
+  `cacheScope`, `credentials` and optionally `onUnauthorized`
+  (see [ADR 0003](docs/adrs/0003-cookie-sessions.md)):
+
+  ```ts
+  const csrf: Middleware = (ctx, next) => {
+    const headers = new Headers(ctx.request.headers);
+    headers.set("X-CSRF", "1");
+    return next({ ...ctx, request: new Request(ctx.request, { headers }) });
+  };
+  const client = createClient({
+    baseUrl: "/api/crud",
+    credentials: "same-origin", // sends the session cookie
+    cacheScope: () => currentUser.sub, // string, or sync/async function
+    onUnauthorized: () => location.assign("/bff/login"),
+    middleware: [csrf, cache.middleware],
+  });
+  ```
+
+  - `cacheScope` (string, or a function called on every request and on
+    `scope()`; must be non-empty) **replaces** the token-hash / `"anon"` scope
+    everywhere: `client.scope()`, `namespace()` (TanStack keys), `ctx.scope`
+    and the `./cache` keys. It wins over `tokenProvider` when both are given
+    (the token still sets `Authorization`; it just no longer picks the
+    scope). Without it nothing changes. In the HTTP cache the scope is
+    percent-encoded in the key. Use something stable per user (the OIDC
+    `sub`), and a different value after logout/login as someone else.
+  - `credentials` is passed to every `fetch` as `RequestInit.credentials`.
+  - `onUnauthorized(response)` is awaited on a final `401` (after the
+    `tokenProvider` refresh retry, if any) with a clone of the response. The
+    call then still rejects with `Unauthorized`; a throwing callback's error
+    replaces it.
+  - There is no `headers` option: add static headers such as `X-CSRF` with a
+    middleware, as above.
+
 - **Middleware.** `createClient({ middleware })` or `client.use(mw)` (added
   innermost). Each request carries a `RequestContext` (`resource`, `op`,
   `recordId`, `scope`, `apiVersion`, `signal`).
@@ -147,7 +182,8 @@ naming them.
 
 `createCache({ store, policies })` (from `./cache`) returns two `Middleware`:
 `cache.middleware` and `cache.autoIfMatch`. Put both **innermost**, after
-whatever sets `Authorization`: the cache scope is `anon` without an
+whatever sets `Authorization`: unless `createClient({ cacheScope })` is set
+(then that scope is used), the cache scope is `anon` without an
 Authorization header, else the first 32 hex characters of the SHA-256 of the
 whole credential, taken from the request as it is sent. `policies` maps
 manifest resource names to `cachePolicyFromManifest(resource)` (plain I1

@@ -1,5 +1,5 @@
 /** Fetch client: manifest-driven resource handles over a middleware chain. */
-import { cacheScope, isInsecureRemote } from "./auth.ts";
+import { EXPLICIT_SCOPE, cacheScope, isInsecureRemote } from "./auth.ts";
 import {
   CapabilityError,
   ClientError,
@@ -12,7 +12,12 @@ import {
   problemFromResponse,
 } from "./errors.ts";
 import { composeMiddleware } from "./interfaces.ts";
-import type { Middleware, Op, TokenProvider } from "./interfaces.ts";
+import type {
+  Middleware,
+  Op,
+  RequestContext,
+  TokenProvider,
+} from "./interfaces.ts";
 import { findResource, loadManifest } from "./manifest.ts";
 import type { JsonObject, Manifest, Resource } from "./manifest.ts";
 import { buildQuery, encodeParams } from "./query.ts";
@@ -584,6 +589,33 @@ export interface ClientOptions {
   readonly fetch?: typeof fetch | undefined;
   /** Returns the bearer token; called again with `refresh: true` once after a `401`. */
   readonly tokenProvider?: TokenProvider | undefined;
+  /**
+   * The cache scope of the caller, for sessions that carry no bearer token
+   * (a cookie session behind a BFF). A string, or a function (sync or async)
+   * called on every request and `scope()`; return the same value for the same
+   * caller (for example the OIDC `sub`). It must be non-empty. When given it
+   * REPLACES the token-hash / `"anon"` scope, even if a `tokenProvider` is also
+   * set (the token still authenticates; it no longer selects the scope), and
+   * the `./cache` middleware keys by it instead of the Authorization header.
+   * Change what it returns on login or logout and nothing cached for the
+   * previous caller is visible.
+   */
+  readonly cacheScope?: string | (() => string | Promise<string>) | undefined;
+  /**
+   * Passed to every `fetch` as `RequestInit.credentials` (`"same-origin"`
+   * sends the session cookie to a same-origin `baseUrl`). Default: the
+   * platform's (`"same-origin"`).
+   */
+  readonly credentials?: NonNullable<RequestInit["credentials"]> | undefined;
+  /**
+   * Called (and awaited) when a request is finally answered `401`, after the
+   * `tokenProvider` refresh retry (if any) has failed to help. It gets a clone
+   * of the response, so its body may be read. The call still rejects with
+   * `Unauthorized` afterwards; if the callback throws, that error is thrown
+   * instead. Typical use: navigate to the login page.
+   */
+  readonly onUnauthorized?:
+    ((response: Response) => void | Promise<void>) | undefined;
   /** Outermost first; see `composeMiddleware`. */
   readonly middleware?: readonly Middleware[] | undefined;
   /** Skips api-catalog discovery. */
@@ -631,6 +663,9 @@ export class CrudClient {
   readonly id: string;
   readonly #fetch: typeof fetch | undefined;
   readonly #tokenProvider: TokenProvider | undefined;
+  readonly #cacheScope: ClientOptions["cacheScope"];
+  readonly #credentials: NonNullable<RequestInit["credentials"]> | undefined;
+  readonly #onUnauthorized: ClientOptions["onUnauthorized"];
   readonly #middleware: Middleware[];
   readonly #manifestUrl: string | undefined;
   readonly #allowedOrigins: readonly string[];
@@ -645,6 +680,9 @@ export class CrudClient {
     this.id = options.id ?? options.baseUrl;
     this.#fetch = options.fetch;
     this.#tokenProvider = options.tokenProvider;
+    this.#cacheScope = options.cacheScope;
+    this.#credentials = options.credentials;
+    this.#onUnauthorized = options.onUnauthorized;
     this.#middleware = [...(options.middleware ?? [])];
     this.#manifestUrl = options.manifestUrl;
     this.#allowedOrigins = [...(options.allowedOrigins ?? [])];
@@ -687,9 +725,26 @@ export class CrudClient {
     return this.#token(refresh);
   }
 
-  /** The cache scope of the current caller (`"anon"` or a hash of the token). */
+  /** The `cacheScope` option's value, else the token's scope (`"anon"` or a hash). */
+  async #scopeOf(token: string | null): Promise<string> {
+    if (this.#cacheScope === undefined) {
+      return cacheScope(token);
+    }
+    const scope =
+      typeof this.#cacheScope === "function"
+        ? await this.#cacheScope()
+        : this.#cacheScope;
+    if (scope === "") {
+      throw new ClientError("cacheScope must not be empty");
+    }
+    return scope;
+  }
+
+  /** The cache scope of the current caller: the `cacheScope` option, else `"anon"` or a hash of the token. */
   async scope(): Promise<string> {
-    return cacheScope(await this.#token(false));
+    return this.#scopeOf(
+      this.#cacheScope === undefined ? await this.#token(false) : null,
+    );
   }
 
   /** The `{ client, scope }` namespace the `./tanstack` key factory takes. */
@@ -716,6 +771,9 @@ export class CrudClient {
       method: call.method,
       headers,
       signal: signal ?? null,
+      ...(this.#credentials === undefined
+        ? {}
+        : { credentials: this.#credentials }),
     };
     if (call.json !== undefined) {
       headers.set("Content-Type", "application/json");
@@ -759,10 +817,11 @@ export class CrudClient {
       resource: call.resource,
       op: call.op,
       recordId: call.recordId,
-      scope: await cacheScope(token),
+      scope: await this.#scopeOf(token),
       apiVersion: call.apiVersion,
       signal,
-    });
+      ...(this.#cacheScope === undefined ? {} : { [EXPLICIT_SCOPE]: true }),
+    } as RequestContext);
   }
 
   /** Sends `call`, retrying once with a refreshed token after a `401`; throws on `>= 400`. */
@@ -775,6 +834,9 @@ export class CrudClient {
         await response.body?.cancel();
         response = await this.#dispatch(call, fresh, signal);
       }
+    }
+    if (response.status === 401 && this.#onUnauthorized !== undefined) {
+      await this.#onUnauthorized(response.clone());
     }
     if (response.status >= 400) {
       throw await problemFromResponse(response);

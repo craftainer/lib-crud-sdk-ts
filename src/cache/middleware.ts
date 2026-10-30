@@ -47,7 +47,7 @@ import {
 } from "./keys.ts";
 import type { CacheKind } from "./keys.ts";
 import { cachePolicyFromManifest } from "./policy.ts";
-import { credentialScope } from "./scope.ts";
+import { contextScope } from "./scope.ts";
 import type { CachePolicy } from "./policy.ts";
 
 /**
@@ -297,7 +297,7 @@ export function createCache(options: CacheOptions): Cache {
 
   const begin = async (ctx: RequestContext): Promise<State | undefined> => {
     const { request, resource } = ctx;
-    const scope = await credentialScope(request.headers);
+    const scope = await contextScope(ctx);
     const generationNow = generation(resource);
     if (request.method !== "GET") {
       if (!WRITE_METHODS.has(request.method)) {
@@ -721,7 +721,7 @@ export function createCache(options: CacheOptions): Cache {
       const etag = await lookupEtag(
         resource,
         recordId,
-        await credentialScope(request.headers),
+        await contextScope(ctx),
         ctx.apiVersion,
       );
       if (etag !== undefined) {
