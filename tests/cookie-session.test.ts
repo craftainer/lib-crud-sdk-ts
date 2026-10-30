@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ClientError, Unauthorized, createClient } from "../src/index.ts";
+import {
+  ClientError,
+  InsecureTransportError,
+  Unauthorized,
+  createClient,
+} from "../src/index.ts";
 import type { ClientOptions, Middleware } from "../src/index.ts";
 import {
   MemoryStore,
@@ -79,10 +84,10 @@ describe("cookie session: credentials and a static header", () => {
 describe("cacheScope", () => {
   it("a string replaces the token scope and is what scope()/namespace() say", async () => {
     const { client } = setup({ user: "ada" }, { cacheScope: "sub-1" });
-    expect(await client.scope()).toBe("sub-1");
+    expect(await client.scope()).toBe("s:sub-1");
     expect(await client.namespace()).toEqual({
       client: BASE,
-      scope: "sub-1",
+      scope: "s:sub-1",
     });
   });
 
@@ -92,10 +97,10 @@ describe("cacheScope", () => {
       { user: "x" },
       { cacheScope: () => scopes.shift() ?? "z" },
     );
-    expect(await client.scope()).toBe("a");
-    expect(await client.scope()).toBe("b");
+    expect(await client.scope()).toBe("s:a");
+    expect(await client.scope()).toBe("s:b");
     const asyncOne = setup({ user: "x" }, { cacheScope: async () => "later" });
-    expect(await asyncOne.client.scope()).toBe("later");
+    expect(await asyncOne.client.scope()).toBe("s:later");
   });
 
   it("replaces the token hash even when a tokenProvider is given, and the token still authenticates", async () => {
@@ -103,7 +108,7 @@ describe("cacheScope", () => {
       { user: "ada" },
       { cacheScope: "sub-1", tokenProvider: () => "tok" },
     );
-    expect(await client.scope()).toBe("sub-1");
+    expect(await client.scope()).toBe("s:sub-1");
     await (await client.resource("heroes")).list();
     expect(seen.at(-1)?.headers.get("authorization")).toBe("Bearer tok");
   });
@@ -115,14 +120,107 @@ describe("cacheScope", () => {
     expect(tokenProvider).not.toHaveBeenCalled();
   });
 
-  it("rejects an empty scope", async () => {
-    const { client } = setup({ user: "a" }, { cacheScope: "" });
-    await expect(client.scope()).rejects.toBeInstanceOf(ClientError);
+  it("rejects anything but a non-empty string", async () => {
+    for (const bad of ["", () => "", () => undefined, () => 42]) {
+      const { client } = setup(
+        { user: "a" },
+        { cacheScope: bad as unknown as string },
+      );
+      await expect(client.scope()).rejects.toBeInstanceOf(ClientError);
+    }
+  });
+
+  it("never equals anon or a token hash, and encodes what it is given", async () => {
+    const anon = setup({ user: "a" }, { cacheScope: "anon" });
+    expect(await anon.client.scope()).toBe("s:anon");
+    const slash = setup({ user: "a" }, { cacheScope: "https://idp/a b" });
+    expect(await slash.client.scope()).toBe("s:https%3A%2F%2Fidp%2Fa%20b");
+  });
+
+  it("evaluates the function once per dispatch and reuses it on the 401 retry", async () => {
+    let evaluations = 0;
+    let n = 0;
+    const scopesSeen: Array<string | undefined> = [];
+    const spy: Middleware = (ctx, next) => {
+      scopesSeen.push(ctx.cacheScope);
+      return next(ctx);
+    };
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m`
+        ? json(manifest)
+        : n++ === 0
+          ? new Response(null, { status: 401 })
+          : json([]),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      cacheScope: () => `v${++evaluations}`,
+      tokenProvider: ({ refresh }) => (refresh ? "t2" : "t1"),
+      middleware: [spy],
+    });
+    const heroes = await client.resource("heroes");
+    await heroes.list();
+    // v1 is the manifest-cache key lookup; then one per manifest request, and one shared by both list attempts
+    expect(scopesSeen).toEqual(["s:v2", "s:v3", "s:v3"]);
+  });
+
+  it("sets ctx.cacheScope only when the option is used", async () => {
+    const seenScopes: Array<string | undefined> = [];
+    const { client } = setup(
+      { user: "a" },
+      {
+        credentials: undefined,
+        middleware: [
+          (ctx, next) => {
+            seenScopes.push(ctx.cacheScope);
+            return next(ctx);
+          },
+        ],
+      },
+    );
+    await client.manifest();
+    expect(seenScopes).toEqual([undefined]);
   });
 
   it("without the option the scope is still the token's", async () => {
     const { client } = setup({ user: "a" }, { credentials: undefined });
     expect(await client.scope()).toBe("anon");
+  });
+});
+
+describe("cleartext guard for cookies", () => {
+  const plain = (
+    url: string,
+    options: Partial<ClientOptions>,
+  ): ReturnType<typeof createClient> =>
+    createClient({
+      baseUrl: url,
+      manifestUrl: `${url}/m`,
+      fetch: fakeFetch(() => json(manifest)).fetch,
+      ...options,
+    });
+
+  it("refuses credentials include/same-origin over plain http to a remote host", async () => {
+    for (const credentials of ["include", "same-origin"] as const) {
+      const client = plain("http://api.example", { credentials });
+      await expect(client.manifest()).rejects.toBeInstanceOf(
+        InsecureTransportError,
+      );
+    }
+  });
+
+  it("allows omit, unset, loopback, https and the explicit opt-in", async () => {
+    await plain("http://api.example", { credentials: "omit" }).manifest();
+    await plain("http://api.example", {}).manifest();
+    await plain("http://localhost:8080", { credentials: "include" }).manifest();
+    await plain("http://127.0.0.1", { credentials: "same-origin" }).manifest();
+    await plain("https://api.example", { credentials: "include" }).manifest();
+    await plain("http://api.example", {
+      credentials: "include",
+      allowInsecureHttp: true,
+    }).manifest();
   });
 });
 
@@ -241,6 +339,20 @@ describe("onUnauthorized", () => {
     expect(calls).toEqual(["401:true"]);
   });
 
+  it("fires for a 401 on the manifest or discovery too, once per call", async () => {
+    const onUnauthorized = vi.fn();
+    const { fetch } = fakeFetch(() => unauthorized());
+    const client = createClient({
+      baseUrl: BASE,
+      fetch,
+      onUnauthorized,
+    });
+    await expect(client.resource("heroes")).rejects.toBeInstanceOf(
+      Unauthorized,
+    );
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
   it("runs after the token refresh retry, once", async () => {
     let n = 0;
     const onUnauthorized = vi.fn();
@@ -266,12 +378,13 @@ describe("onUnauthorized", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
-  it("is not called for other statuses, and a throwing callback replaces the error", async () => {
+  it("is not called for other statuses; a throwing callback becomes the cause of Unauthorized", async () => {
     const onUnauthorized = vi.fn();
     const ok = setup({ user: "a" }, { onUnauthorized });
     await (await ok.client.resource("heroes")).list();
     expect(onUnauthorized).not.toHaveBeenCalled();
 
+    const boom = new Error("redirect failed");
     const { fetch } = fakeFetch((r) =>
       r.url === `${BASE}/m` ? json(manifest) : unauthorized(),
     );
@@ -280,10 +393,12 @@ describe("onUnauthorized", () => {
       manifestUrl: `${BASE}/m`,
       fetch,
       onUnauthorized: () => {
-        throw new Error("redirect failed");
+        throw boom;
       },
     });
     const heroes = await client.resource("heroes");
-    await expect(heroes.list()).rejects.toThrow("redirect failed");
+    const error = await heroes.list().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Unauthorized);
+    expect((error as Unauthorized).cause).toBe(boom);
   });
 });

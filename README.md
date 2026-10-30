@@ -135,19 +135,30 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   });
   ```
 
-  - `cacheScope` (string, or a function called on every request and on
-    `scope()`; must be non-empty) **replaces** the token-hash / `"anon"` scope
+  - `cacheScope` (string, or a function; it must resolve to a non-empty
+    string, else `ClientError`) **replaces** the token-hash / `"anon"` scope
     everywhere: `client.scope()`, `namespace()` (TanStack keys), `ctx.scope`
     and the `./cache` keys. It wins over `tokenProvider` when both are given
     (the token still sets `Authorization`; it just no longer picks the
-    scope). Without it nothing changes. In the HTTP cache the scope is
-    percent-encoded in the key. Use something stable per user (the OIDC
+    scope), and `scope()` does not call the `tokenProvider` then. A function
+    is evaluated once per dispatch (and reused on the 401 retry) and by
+    `scope()`. The resulting scope is internally namespaced (`s:` + the
+    percent-encoded value; treat it as opaque), so it never equals `anon` or
+    a token hash. The client sets `ctx.cacheScope` only when the option is
+    used, and the cache keys by it, else by the Authorization header as
+    before. **Middleware must carry context fields through** (build the next
+    context with `{ ...ctx, request }`); dropping `cacheScope` makes the cache
+    fall back to the header scope. Use something stable per user (the OIDC
     `sub`), and a different value after logout/login as someone else.
   - `credentials` is passed to every `fetch` as `RequestInit.credentials`.
-  - `onUnauthorized(response)` is awaited on a final `401` (after the
-    `tokenProvider` refresh retry, if any) with a clone of the response. The
-    call then still rejects with `Unauthorized`; a throwing callback's error
-    replaces it.
+  - `credentials` `"include"` or `"same-origin"` over plain `http:` to a
+    non-loopback host is refused with `InsecureTransportError`, like an
+    `Authorization` header (`allowInsecureHttp: true` opts in).
+  - `onUnauthorized(response)` is awaited on any final `401` (after the
+    `tokenProvider` refresh retry, if any; manifest and discovery included),
+    at most once per client call, with a clone of the response. The call then
+    still rejects with `Unauthorized`; if the callback throws, its error is
+    the `Unauthorized`'s `cause`.
   - There is no `headers` option: add static headers such as `X-CSRF` with a
     middleware, as above.
 

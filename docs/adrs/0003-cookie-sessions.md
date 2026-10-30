@@ -25,18 +25,24 @@ We add three optional `ClientOptions`, backwards compatible (minor release):
 
 - `cacheScope?: string | (() => string | Promise<string>)`. When set it
   replaces the token-hash / `"anon"` scope entirely, including when a
-  `tokenProvider` is also given (the token still authenticates). The client
-  marks the `RequestContext` (an internal symbol-keyed property that survives
-  `{ ...ctx }`), and the cache middleware keys by `ctx.scope` only when marked,
-  otherwise by `credentialScope(headers)` as before, so a middleware that sets
-  its own `Authorization` stays covered for existing users. The scope is
-  percent-encoded in cache keys, which are slash-separated. An empty scope is
-  a `ClientError`.
-- `credentials?: RequestCredentials`, passed to every request.
-- `onUnauthorized?: (response: Response) => void | Promise<void>`, awaited on a
-  final `401` after the refresh retry. The call still rejects with
-  `Unauthorized`, following the SDK's error model (errors are thrown, never
-  swallowed); callers can both navigate and surface the error.
+  `tokenProvider` is also given (the token still authenticates). It must
+  resolve to a non-empty string, else `ClientError`. The client namespaces it
+  internally (`s:` + `encodeURIComponent(value)`, so it never equals `anon`
+  or a token hash and adds no key segments), evaluates a function once per
+  dispatch (reused on the 401 retry), and sets it as `ctx.scope` and as the
+  new optional public `RequestContext.cacheScope`. The cache middleware keys
+  by `ctx.cacheScope` when present, otherwise by `credentialScope(headers)` as
+  before, so a middleware that sets its own `Authorization` stays covered for
+  existing users.
+- `credentials?: RequestInit["credentials"]`, passed to every request.
+  `"include"` or `"same-origin"` over plain `http:` to a non-loopback host is
+  refused with `InsecureTransportError`, the same rule as for `Authorization`
+  (`allowInsecureHttp` opts in).
+- `onUnauthorized?: (response: Response) => void | Promise<void>`, awaited on
+  any final `401` (manifest and discovery included: under a BFF those also
+  mean "not logged in") after the refresh retry, at most once per client call.
+  The call still rejects with `Unauthorized`, following the SDK's error model;
+  if the callback throws, its error becomes the `Unauthorized`'s `cause`.
 
 We do not add a `headers` option. Static headers such as `X-CSRF` go through
 the existing middleware chain, which already covers every request including
@@ -46,12 +52,13 @@ the manifest, so a second mechanism would be redundant public API.
 
 - Token users see no change; cookie-session users get per-user cache isolation
   in the client, the TanStack keys and the HTTP cache.
-- The marker is not in `interfaces.ts` (fixed contract I3), so a custom
-  middleware that rebuilds a context without spreading it loses the marker and
-  falls back to the header scope. Spreading (`{ ...ctx }`) is the documented
-  way to pass a changed request.
+- The scope travels in a typed context field, so it fails closed only as long
+  as middleware carry context fields through: a middleware that builds a
+  context without spreading `ctx` drops `cacheScope` and the cache falls back
+  to the header scope (`anon` for cookie sessions). Spreading
+  (`{ ...ctx, request }`) is the documented way to pass a changed request.
 - The caller owns scope correctness: it must change when the user changes, and
   stay stable for one user. A function is evaluated per request, so it should
   be cheap.
 - `onUnauthorized` gets a clone, so reading its body does not break error
-  parsing; a throwing callback replaces `Unauthorized`.
+  parsing.
