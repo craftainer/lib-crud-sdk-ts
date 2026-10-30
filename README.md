@@ -141,8 +141,8 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     and the `./cache` keys. It wins over `tokenProvider` when both are given
     (the token still sets `Authorization`; it just no longer picks the
     scope), and `scope()` does not call the `tokenProvider` then. A function
-    is evaluated once per dispatch (and reused on the 401 retry) and by
-    `scope()`. The resulting scope is internally namespaced (`s:` + the
+    is evaluated per request (reused across that request's 401 retry), plus
+    once per `scope()` call. The resulting scope is internally namespaced (`s:` + the
     percent-encoded value; treat it as opaque), so it never equals `anon` or
     a token hash. The client sets `ctx.cacheScope` only when the option is
     used, and the cache keys by it, else by the Authorization header as
@@ -151,20 +151,29 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     fall back to the header scope. Use something stable per user (the OIDC
     `sub`), and a different value after logout/login as someone else.
   - `credentials` is passed to every `fetch` as `RequestInit.credentials`.
-  - `credentials` `"include"` or `"same-origin"` over plain `http:` to a
+  - `credentials: "include"` over plain `http:` to a
     non-loopback host is refused with `InsecureTransportError`, like an
     `Authorization` header (`allowInsecureHttp: true` opts in).
-  - `onUnauthorized(response)` is awaited on any final `401` (after the
-    `tokenProvider` refresh retry, if any; manifest and discovery included),
-    at most once per client call, with a clone of the response. The call then
-    still rejects with `Unauthorized`; if the callback throws, its error is
-    the `Unauthorized`'s `cause`.
+  - `onUnauthorized(response)` is awaited on each final `401` response, after
+    the `tokenProvider` refresh retry (if any); manifest and discovery
+    requests included. A call that makes several requests can fire it more
+    than once, so make it idempotent (for example a navigation). It gets a
+    clone of the response. The call then still rejects with `Unauthorized`; if
+    the callback throws, its error is the `Unauthorized`'s `cause`, or, when
+    the problem already has a `cause`, a non-enumerable `onUnauthorizedError`
+    property.
   - There is no `headers` option: add static headers such as `X-CSRF` with a
     middleware, as above.
 
-- **Middleware.** `createClient({ middleware })` or `client.use(mw)` (added
-  innermost). Each request carries a `RequestContext` (`resource`, `op`,
-  `recordId`, `scope`, `apiVersion`, `signal`).
+- **Middleware.** > [!WARNING]
+  > Middleware must carry context fields through: build the next context with
+  > `{ ...ctx, request }`. A middleware that builds a fresh `RequestContext`
+  > drops `cacheScope`, and the `./cache` middleware then falls back to the
+  > Authorization-header scope (`anon` for cookie sessions), sharing entries
+  > between users.
+  > `createClient({ middleware })` or `client.use(mw)` (added
+  > innermost). Each request carries a `RequestContext` (`resource`, `op`,
+  > `recordId`, `scope`, `apiVersion`, `signal`).
 - **Response shape.** A call that expects an object or array and gets a `204`,
   an empty body or JSON of the wrong shape throws `ResponseError`, as a body
   that is not JSON does. `client.resource("heroes")` picks the highest

@@ -587,8 +587,8 @@ export interface ClientOptions {
   /**
    * The cache scope of the caller, for sessions that carry no bearer token
    * (a cookie session behind a BFF). A string, or a function (sync or async)
-   * called on every request and `scope()`; return the same value for the same
-   * caller (for example the OIDC `sub`). It must be non-empty. When given it
+   * evaluated per request (and reused across that request's 401 retry), plus
+   * once per `scope()` call; return the same value for the same caller (for example the OIDC `sub`). It must be non-empty. When given it
    * REPLACES the token-hash / `"anon"` scope, even if a `tokenProvider` is also
    * set (the token still authenticates; it no longer selects the scope), and
    * the `./cache` middleware keys by it instead of the Authorization header.
@@ -599,17 +599,20 @@ export interface ClientOptions {
   /**
    * Passed to every `fetch` as `RequestInit.credentials` (`"same-origin"`
    * sends the session cookie to a same-origin `baseUrl`). Default: the
-   * platform's (`"same-origin"`).
+   * platform's (`"same-origin"`). `"include"` over plain `http:` to a
+   * non-loopback host is refused with {@link InsecureTransportError}.
    */
   readonly credentials?: NonNullable<RequestInit["credentials"]> | undefined;
   /**
-   * Called (and awaited) when a request is finally answered `401`, after the
-   * `tokenProvider` refresh retry (if any) has failed to help. It gets a clone
-   * of the response, so its body may be read. The call still rejects with
-   * `Unauthorized` afterwards; if the callback throws, that error is the
-   * `cause` of the `Unauthorized`. Fires for any request of the call
-   * (manifest and discovery included), at most once per client call. Typical
-   * use: navigate to the login page.
+   * Called (and awaited) on each final `401` response, after the
+   * `tokenProvider` refresh retry (if any) has failed to help; manifest and
+   * discovery requests included. A client call that makes several requests
+   * can fire it more than once, so make it idempotent (for example a
+   * navigation). It gets a clone of the response, so its body may be read.
+   * The call still rejects with `Unauthorized` afterwards; if the callback
+   * throws, its error is the `Unauthorized`'s `cause` (or, when the problem
+   * already has a `cause`, a non-enumerable `onUnauthorizedError` property).
+   * Typical use: navigate to the login page.
    */
   readonly onUnauthorized?:
     ((response: Response) => void | Promise<void>) | undefined;
@@ -633,7 +636,7 @@ export interface ClientOptions {
   readonly allowedOrigins?: readonly string[] | undefined;
   /**
    * Allow sending an `Authorization` header (the bearer token), or cookies
-   * (`credentials: "include"` or `"same-origin"`), over plain `http:` to a
+   * (`credentials: "include"`), over plain `http:` to a
    * host that is not loopback. Default `false`: such a request is refused
    * with {@link InsecureTransportError} before it is sent.
    * Loopback (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`) and
@@ -796,8 +799,7 @@ export class CrudClient {
       if (
         !this.#allowInsecureHttp &&
         (ctx.request.headers.has("Authorization") ||
-          this.#credentials === "include" ||
-          this.#credentials === "same-origin") &&
+          this.#credentials === "include") &&
         isInsecureRemote(ctx.request.url)
       ) {
         throw new InsecureTransportError(
@@ -859,7 +861,17 @@ export class CrudClient {
     if (response.status >= 400) {
       const problem = await problemFromResponse(response);
       if (callbackFailed) {
-        problem.cause = callbackError;
+        if (problem.cause === undefined) {
+          problem.cause = callbackError;
+        } else {
+          // Keep the cause the problem already has; expose the callback's error here.
+          Object.defineProperty(problem, "onUnauthorizedError", {
+            value: callbackError,
+            enumerable: false,
+            configurable: true,
+            writable: true,
+          });
+        }
       }
       throw problem;
     }

@@ -202,17 +202,18 @@ describe("cleartext guard for cookies", () => {
       ...options,
     });
 
-  it("refuses credentials include/same-origin over plain http to a remote host", async () => {
-    for (const credentials of ["include", "same-origin"] as const) {
-      const client = plain("http://api.example", { credentials });
-      await expect(client.manifest()).rejects.toBeInstanceOf(
-        InsecureTransportError,
-      );
-    }
+  it("refuses credentials include over plain http to a remote host", async () => {
+    const client = plain("http://api.example", { credentials: "include" });
+    await expect(client.manifest()).rejects.toBeInstanceOf(
+      InsecureTransportError,
+    );
   });
 
   it("allows omit, unset, loopback, https and the explicit opt-in", async () => {
     await plain("http://api.example", { credentials: "omit" }).manifest();
+    await plain("http://api.example", {
+      credentials: "same-origin",
+    }).manifest();
     await plain("http://api.example", {}).manifest();
     await plain("http://localhost:8080", { credentials: "include" }).manifest();
     await plain("http://127.0.0.1", { credentials: "same-origin" }).manifest();
@@ -378,6 +379,23 @@ describe("onUnauthorized", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
+  it("fires per final 401 response: two calls, two firings", async () => {
+    const onUnauthorized = vi.fn();
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m` ? json(manifest) : unauthorized(),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      onUnauthorized,
+    });
+    const heroes = await client.resource("heroes");
+    await heroes.list().catch(() => undefined);
+    await heroes.get(1).catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
+  });
+
   it("is not called for other statuses; a throwing callback becomes the cause of Unauthorized", async () => {
     const onUnauthorized = vi.fn();
     const ok = setup({ user: "a" }, { onUnauthorized });
@@ -400,5 +418,67 @@ describe("onUnauthorized", () => {
     const error = await heroes.list().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Unauthorized);
     expect((error as Unauthorized).cause).toBe(boom);
+  });
+});
+
+describe("tokenProvider-only clients are unchanged", () => {
+  const T1 = "628b49d96dcde97a430dd4f597705899"; // sha256("t1")[0..32]
+  const T2 = "c44474038d459e40e4714afefa7bf8da"; // sha256("t2")[0..32]
+
+  it("keeps scope(), ctx.scope, ctx.cacheScope and cache keys across a 401 refresh retry", async () => {
+    const keys: string[] = [];
+    const inner = new MemoryStore();
+    const store = {
+      get: (key: string) => inner.get(key),
+      set: (key: string, entry: never, ttl?: number) => {
+        keys.push(key);
+        return inner.set(key, entry, ttl);
+      },
+      delete: (key: string) => inner.delete(key),
+      clear: (prefix?: string) => inner.clear(prefix),
+    };
+    const cache = createCache({
+      store,
+      policies: {
+        heroes: cachePolicyFromManifest(manifest.resources[0] as never),
+      },
+    });
+    const contexts: Array<{ scope: string; has: boolean }> = [];
+    const spy: Middleware = (ctx, next) => {
+      contexts.push({ scope: ctx.scope, has: "cacheScope" in ctx });
+      return next(ctx);
+    };
+    let token = "t1";
+    let n = 0;
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m`
+        ? json(manifest)
+        : n++ === 0
+          ? new Response(null, { status: 401 })
+          : json([{ id: 1 }], { headers: { etag: '"1"' } }),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      tokenProvider: ({ refresh }) => {
+        if (refresh) {
+          token = "t2";
+        }
+        return token;
+      },
+      middleware: [spy, cache.middleware],
+    });
+    expect(await client.scope()).toBe(T1);
+    const heroes = await client.resource("heroes");
+    await heroes.list();
+    expect(await client.scope()).toBe(T2);
+    // manifest (t1), list with t1 (401), list retried with t2
+    expect(contexts).toEqual([
+      { scope: T1, has: false },
+      { scope: T1, has: false },
+      { scope: T2, has: false },
+    ]);
+    expect(keys).toEqual([`v1/heroes/list/_/v2/${T2}/`]);
   });
 });

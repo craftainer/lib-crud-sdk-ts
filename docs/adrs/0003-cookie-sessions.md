@@ -28,21 +28,25 @@ We add three optional `ClientOptions`, backwards compatible (minor release):
   `tokenProvider` is also given (the token still authenticates). It must
   resolve to a non-empty string, else `ClientError`. The client namespaces it
   internally (`s:` + `encodeURIComponent(value)`, so it never equals `anon`
-  or a token hash and adds no key segments), evaluates a function once per
-  dispatch (reused on the 401 retry), and sets it as `ctx.scope` and as the
+  or a token hash and adds no key segments), evaluates a function per request
+  (reused across that request's 401 retry, plus once per `scope()` call), and sets it as `ctx.scope` and as the
   new optional public `RequestContext.cacheScope`. The cache middleware keys
   by `ctx.cacheScope` when present, otherwise by `credentialScope(headers)` as
   before, so a middleware that sets its own `Authorization` stays covered for
   existing users.
 - `credentials?: RequestInit["credentials"]`, passed to every request.
-  `"include"` or `"same-origin"` over plain `http:` to a non-loopback host is
-  refused with `InsecureTransportError`, the same rule as for `Authorization`
-  (`allowInsecureHttp` opts in).
+  `"include"` over plain `http:` to a non-loopback host is refused with
+  `InsecureTransportError`, the same rule as for `Authorization`
+  (`allowInsecureHttp` opts in). `"same-origin"` is not guarded: it can only
+  target the page's own origin, like the unguarded platform default.
 - `onUnauthorized?: (response: Response) => void | Promise<void>`, awaited on
-  any final `401` (manifest and discovery included: under a BFF those also
-  mean "not logged in") after the refresh retry, at most once per client call.
-  The call still rejects with `Unauthorized`, following the SDK's error model;
-  if the callback throws, its error becomes the `Unauthorized`'s `cause`.
+  each final `401` response, after the refresh retry (manifest and discovery
+  included: under a BFF those also mean "not logged in"). A call that makes
+  several requests can fire it more than once, so it should be idempotent
+  (navigation). The call still rejects with `Unauthorized`, following the
+  SDK's error model; if the callback throws, its error becomes the
+  `Unauthorized`'s `cause` (or a non-enumerable `onUnauthorizedError` when a
+  `cause` is already set).
 
 We do not add a `headers` option. Static headers such as `X-CSRF` go through
 the existing middleware chain, which already covers every request including
