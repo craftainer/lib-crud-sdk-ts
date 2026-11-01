@@ -667,12 +667,12 @@ export function createCache(options: CacheOptions): Cache {
     }
   };
 
-  const apply = async (op: StoreOp): Promise<void> => {
+  const apply = async (op: StoreOp, keepValidator = false): Promise<void> => {
     if (op.type === "validator") {
       rememberValidator(op.key, op.etag);
       return;
     }
-    if (op.type === "delete") {
+    if (op.type === "delete" && !keepValidator) {
       validators.delete(op.key);
     }
     await safe(() =>
@@ -707,8 +707,14 @@ export function createCache(options: CacheOptions): Cache {
       bump(state.ctx.resource as string); // before applying: reads now in flight must not store fresh
     }
     const expected = generation(state.ctx.resource);
+    // A read that began before an invalidation or write must not re-seed or
+    // overwrite the validator that event dropped or set.
+    const stale = state.kind !== undefined && expected !== state.generation;
     for (const op of ops) {
-      await apply(op);
+      if (stale && op.type === "validator") {
+        continue;
+      }
+      await apply(op, stale);
     }
     if (generation(state.ctx.resource) !== expected) {
       // An invalidation landed while storing: drop what was just stored.

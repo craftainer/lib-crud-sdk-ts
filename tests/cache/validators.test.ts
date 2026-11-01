@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MemoryStore,
   cachePolicyFromManifest,
@@ -6,7 +6,7 @@ import {
   createCache,
 } from "../../src/cache/index.ts";
 import type { RequestContext } from "../../src/interfaces.ts";
-import { ctxFor, fakeNet, json } from "./helpers.ts";
+import { ctxFor, deferred, fakeNet, json } from "./helpers.ts";
 
 const ETAG1 = 'W/"1"';
 const ETAG2 = 'W/"2"';
@@ -130,6 +130,22 @@ describe("validators of no-store responses", () => {
     await s.run(read());
     await s.cache.clear();
     expect(await etag()).toBeUndefined();
+  });
+
+  it("ignores a read that began before a write landed", async () => {
+    const s = setup();
+    const gate = deferred<Response>();
+    s.net.push(
+      () => gate.promise,
+      json({ id: 5 }, { headers: { etag: ETAG2, ...NO_STORE } }),
+    );
+    const slow = s.run(read());
+    await vi.waitFor(() => expect(s.net.sent).toHaveLength(1));
+    await s.run(patch());
+    expect(await s.cache.cachedEtag("heroes", 5, "anon", null)).toBe(ETAG2);
+    gate.resolve(json({ id: 5 }, { headers: { etag: ETAG1, ...NO_STORE } }));
+    await slow;
+    expect(await s.cache.cachedEtag("heroes", 5, "anon", null)).toBe(ETAG2);
   });
 
   it("does not leak validators across a cacheScope switch", async () => {
