@@ -1,0 +1,18 @@
+# gitleaks config (https://github.com/gitleaks/gitleaks#configuration),
+# read from the repo root by both the staged and the full-history hooks
+# in .pre-commit-config.yaml. Extends the built-in ruleset; add an
+# [[allowlists]] entry below only for a specific, reviewed false positive
+# (see docs/TEMPLATE.md's "Checks"), scoped as narrowly as possible
+# (a path AND/OR a regex, never a whole rule or directory "just in case")
+# and always with a description saying why it is safe.
+
+title = "template-base gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Unsigned alg:none dummy JWT used to test cacheScope token hashing; not a credential"
+paths = ['''^tests/auth\.test\.ts$''']
+regexes = ['''eyJhbGciOiJub25lIn0\.eyJzdWIiOiJhZG1pbiJ9\.sig''']
+condition = "AND"
