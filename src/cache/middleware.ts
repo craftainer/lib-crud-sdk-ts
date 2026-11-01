@@ -226,11 +226,10 @@ export function createCache(options: CacheOptions): Cache {
    * included. RFC 9111 forbids storing such a response, not reading its
    * validator, and the validator is used only for `If-Match` (`cachedEtag`,
    * `autoIfMatch`), never to serve or revalidate content. Map order is the
-   * recency order. Cleared by the same prefixes as the store, and wholesale
-   * when the caller scope changes.
+   * recency order. Keys carry the caller scope, so scopes stay isolated;
+   * cleared by the same prefixes as the store.
    */
   const validators = new Map<string, string>();
-  let validatorScope: string | undefined;
   const rememberValidator = (key: string, etag: string | undefined): void => {
     validators.delete(key);
     if (etag === undefined) {
@@ -336,11 +335,6 @@ export function createCache(options: CacheOptions): Cache {
   const begin = async (ctx: RequestContext): Promise<State | undefined> => {
     const { request, resource } = ctx;
     const scope = await contextScope(ctx);
-    if (scope !== validatorScope) {
-      // A user switch: no validator may outlive the scope that saw it.
-      forgetValidators(undefined);
-      validatorScope = scope;
-    }
     const generationNow = generation(resource);
     if (request.method !== "GET") {
       if (!WRITE_METHODS.has(request.method)) {
@@ -481,6 +475,14 @@ export function createCache(options: CacheOptions): Cache {
     const at = now();
     const { fresh, stale } = entryTimes(state, kind);
     const old = state.entry;
+    // The validator lives under the query-less record key, where `lookupEtag` looks.
+    const vkey = buildKey({
+      resource: state.ctx.resource as string,
+      kind: "record",
+      recordId: state.ctx.recordId,
+      scope: state.scope,
+      apiVersion: state.ctx.apiVersion,
+    });
     if (status === 304 && state.validated === true && old !== undefined) {
       // `validated` means the request carried `old.etag`.
       const updated: CacheEntry = {
@@ -504,7 +506,7 @@ export function createCache(options: CacheOptions): Cache {
             ? [
                 {
                   type: "validator" as const,
-                  key,
+                  key: vkey,
                   etag: updated.etag,
                 },
               ]
@@ -526,7 +528,7 @@ export function createCache(options: CacheOptions): Cache {
       }
       const ops: StoreOp[] = [
         { type: "set", key, entry, ttlMs: retentionMs(fresh, stale) },
-        ...(kind === "record" ? validatorOps(state, response, key) : []),
+        ...(kind === "record" ? validatorOps(state, response, vkey) : []),
       ];
       if (kind === "manifest") {
         ops.push(...manifestOps(old, entry));
@@ -540,7 +542,7 @@ export function createCache(options: CacheOptions): Cache {
         ops: [
           { type: "delete", key },
           ...(kind === "record" && status === 200
-            ? validatorOps(state, response, key)
+            ? validatorOps(state, response, vkey)
             : []),
         ],
       };

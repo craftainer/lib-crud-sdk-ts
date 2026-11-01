@@ -158,12 +158,40 @@ describe("validators of no-store responses", () => {
     await s.run(read("s:alice"));
     await s.run(patch("s:bob"));
     expect(lastIfMatch(s.net)).toBeNull();
-    // Alice's validator did not survive bob's session either.
-    await s.run(patch("s:alice"));
-    expect(lastIfMatch(s.net)).toBeNull();
+    // Bob's write did not touch or read alice's validator.
     expect(
-      await s.cache.cachedEtag("heroes", 5, "s:alice", null),
+      await s.cache.cachedEtag("heroes", 5, "s:bob", null),
     ).toBeUndefined();
+  });
+
+  it("finds the validator after a queried record read", async () => {
+    const s = setup();
+    s.net.push(
+      json({ id: 5 }, { headers: { etag: ETAG1, ...NO_STORE } }),
+      json({ id: 5 }, { headers: NO_STORE }),
+    );
+    await s.run(
+      ctxFor("record", { recordId: 5, query: "?id=5&expand=powers" }),
+    );
+    expect(await s.cache.cachedEtag("heroes", 5, "anon", null)).toBe(ETAG1);
+    await s.run(patch());
+    expect(lastIfMatch(s.net)).toBe(ETAG1);
+  });
+
+  it("keeps each scope's validator when scopes alternate", async () => {
+    const s = setup();
+    s.net.push(
+      json({ id: 5 }, { headers: { etag: ETAG1, ...NO_STORE } }),
+      json({ id: 5 }, { headers: { etag: ETAG2, ...NO_STORE } }),
+      json({ id: 5 }, { headers: NO_STORE }),
+      json({ id: 5 }, { headers: NO_STORE }),
+    );
+    await s.run(read("s:alice"));
+    await s.run(read("s:bob"));
+    expect(await s.cache.cachedEtag("heroes", 5, "s:alice", null)).toBe(ETAG1);
+    expect(await s.cache.cachedEtag("heroes", 5, "s:bob", null)).toBe(ETAG2);
+    await s.run(patch("s:alice"));
+    expect(lastIfMatch(s.net)).toBe(ETAG1);
   });
 
   it("keeps the footprint bounded", async () => {
