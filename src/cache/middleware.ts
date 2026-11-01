@@ -115,7 +115,13 @@ type StoreOp =
       readonly entry: CacheEntry;
       readonly ttlMs: number;
     }
-  | { readonly type: "delete"; readonly key: string };
+  | { readonly type: "delete"; readonly key: string }
+  | {
+      /** Remember (or, without `etag`, forget) a record's last-seen validator. */
+      readonly type: "validator";
+      readonly key: string;
+      readonly etag: string | undefined;
+    };
 
 /** What `begin` learned about one request. */
 interface State {
@@ -135,6 +141,8 @@ interface State {
 }
 
 const MIN_RETENTION_MS = 3_600_000;
+/** Bound on remembered validators (LRU), the same as `MemoryStore`'s default size. */
+const MAX_VALIDATORS = 1024;
 const MANIFEST_POLICY: CachePolicy = cachePolicyFromManifest({});
 const WRITE_METHODS: ReadonlySet<string> = new Set([
   "POST",
@@ -213,6 +221,36 @@ export function createCache(options: CacheOptions): Cache {
   const inflight = new Set<string>();
   const tasks = new Set<Promise<void>>();
   const background = new AbortController();
+  /**
+   * The last ETag seen per record key from any successful response, `no-store`
+   * included. RFC 9111 forbids storing such a response, not reading its
+   * validator, and the validator is used only for `If-Match` (`cachedEtag`,
+   * `autoIfMatch`), never to serve or revalidate content. Map order is the
+   * recency order. Cleared by the same prefixes as the store, and wholesale
+   * when the caller scope changes.
+   */
+  const validators = new Map<string, string>();
+  let validatorScope: string | undefined;
+  const rememberValidator = (key: string, etag: string | undefined): void => {
+    validators.delete(key);
+    if (etag === undefined) {
+      return;
+    }
+    validators.set(key, etag);
+    while (validators.size > MAX_VALIDATORS) {
+      validators.delete(validators.keys().next().value as string);
+    }
+  };
+  const forgetValidators = (prefixes: readonly string[] | undefined): void => {
+    for (const key of validators.keys()) {
+      if (
+        prefixes === undefined ||
+        prefixes.some((prefix) => key.startsWith(prefix))
+      ) {
+        validators.delete(key);
+      }
+    }
+  };
 
   let globalGeneration = 0; // bumped by `clear`, which may span resources
   const generation = (resource: string | undefined): number =>
@@ -298,6 +336,11 @@ export function createCache(options: CacheOptions): Cache {
   const begin = async (ctx: RequestContext): Promise<State | undefined> => {
     const { request, resource } = ctx;
     const scope = await contextScope(ctx);
+    if (scope !== validatorScope) {
+      // A user switch: no validator may outlive the scope that saw it.
+      forgetValidators(undefined);
+      validatorScope = scope;
+    }
     const generationNow = generation(resource);
     if (request.method !== "GET") {
       if (!WRITE_METHODS.has(request.method)) {
@@ -412,6 +455,21 @@ export function createCache(options: CacheOptions): Cache {
     return clears([...names].sort().map((name) => kindPrefix(name, "filters")));
   };
 
+  /** The validator op for a record read or write response (none for other kinds). */
+  const validatorOps = (
+    state: State,
+    response: Response,
+    key: string,
+  ): StoreOp[] => [
+    {
+      type: "validator",
+      key,
+      etag: state.policy.etag
+        ? (response.headers.get("etag") ?? undefined)
+        : undefined,
+    },
+  ];
+
   const readPlan = (
     state: State,
     response: Response,
@@ -442,6 +500,15 @@ export function createCache(options: CacheOptions): Cache {
             entry: updated,
             ttlMs: retentionMs(fresh, stale),
           },
+          ...(kind === "record"
+            ? [
+                {
+                  type: "validator" as const,
+                  key,
+                  etag: updated.etag,
+                },
+              ]
+            : []),
         ],
       };
     }
@@ -459,6 +526,7 @@ export function createCache(options: CacheOptions): Cache {
       }
       const ops: StoreOp[] = [
         { type: "set", key, entry, ttlMs: retentionMs(fresh, stale) },
+        ...(kind === "record" ? validatorOps(state, response, key) : []),
       ];
       if (kind === "manifest") {
         ops.push(...manifestOps(old, entry));
@@ -466,7 +534,16 @@ export function createCache(options: CacheOptions): Cache {
       return { result: response, ops };
     }
     if (status === 200 || status === 404 || status === 410) {
-      return { result: response, ops: [{ type: "delete", key }] };
+      // A `200` that was not stored (`no-store`, not JSON) still leaves its validator.
+      return {
+        result: response,
+        ops: [
+          { type: "delete", key },
+          ...(kind === "record" && status === 200
+            ? validatorOps(state, response, key)
+            : []),
+        ],
+      };
     }
     return { result: response, ops: [] };
   };
@@ -545,7 +622,20 @@ export function createCache(options: CacheOptions): Cache {
           recordPrefix(resource, recordId),
         ]),
         ...(op === "update" && response !== undefined && ok
-          ? writeThrough(state, response, body, resource, recordId)
+          ? [
+              ...writeThrough(state, response, body, resource, recordId),
+              ...validatorOps(
+                state,
+                response,
+                buildKey({
+                  resource,
+                  kind: "record",
+                  recordId,
+                  scope: state.scope,
+                  apiVersion: state.ctx.apiVersion,
+                }),
+              ),
+            ]
           : []),
       ];
     }
@@ -567,6 +657,7 @@ export function createCache(options: CacheOptions): Cache {
 
   /** One pass when the store can, else one `clear` per prefix; a failure is a miss. */
   const clearPrefixes = async (prefixes: readonly string[]): Promise<void> => {
+    forgetValidators(prefixes);
     if (store.clearMany !== undefined) {
       await safe(() => store.clearMany?.(prefixes));
       return;
@@ -577,6 +668,13 @@ export function createCache(options: CacheOptions): Cache {
   };
 
   const apply = async (op: StoreOp): Promise<void> => {
+    if (op.type === "validator") {
+      rememberValidator(op.key, op.etag);
+      return;
+    }
+    if (op.type === "delete") {
+      validators.delete(op.key);
+    }
     await safe(() =>
       op.type === "clear"
         ? clearPrefixes(op.prefixes)
@@ -614,7 +712,7 @@ export function createCache(options: CacheOptions): Cache {
     }
     if (generation(state.ctx.resource) !== expected) {
       // An invalidation landed while storing: drop what was just stored.
-      for (const op of ops.filter((candidate) => candidate.type === "set")) {
+      for (const op of ops.filter((candidate) => candidate.type !== "clear")) {
         await apply({ type: "delete", key: op.key });
       }
     }
@@ -739,11 +837,19 @@ export function createCache(options: CacheOptions): Cache {
     scope: string,
     apiVersion: string | null,
   ): Promise<string | undefined> => {
-    const entry = await safe(() =>
-      store.get(
-        buildKey({ resource, kind: "record", recordId, scope, apiVersion }),
-      ),
-    );
+    const key = buildKey({
+      resource,
+      kind: "record",
+      recordId,
+      scope,
+      apiVersion,
+    });
+    const remembered = validators.get(key);
+    if (remembered !== undefined) {
+      rememberValidator(key, remembered); // touch: most recently used
+      return remembered;
+    }
+    const entry = await safe(() => store.get(key));
     return entry?.etag;
   };
 
@@ -768,6 +874,7 @@ export function createCache(options: CacheOptions): Cache {
     },
     async clear(prefix) {
       globalGeneration += 1; // reads in flight must not store fresh over the clear
+      forgetValidators(prefix === undefined ? undefined : [prefix]);
       await safe(() => store.clear(prefix));
     },
     cachedEtag: lookupEtag,
