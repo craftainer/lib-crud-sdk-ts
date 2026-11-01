@@ -226,6 +226,12 @@ objects, snake_case members).
   as a read answered `404`/`410` does. A bulk write of unknown outcome clears
   the whole resource, as its ids are not known. A write aborted before it
   was sent clears nothing.
+- A `no-store` response (the BFF default) is never stored, but its `ETag` is
+  remembered per record and scope (an LRU of 1024) for `If-Match` only:
+  `cachedEtag` and `autoIfMatch` use it, a read never does. A newer `ETag`
+  replaces it; a write, `412`, `404`/`410`, `DELETE`, an SSE invalidation,
+  `clear` or a scope switch drops it (see
+  [ADR 0004](docs/adrs/0004-remember-validators-of-no-store-responses.md)).
 - Wire the stream with `invalidateOnEvents(cache, getEventHub({ fetch, url,
 events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   never apply snapshots. `subscribeEvents` is the lower-level entry.
