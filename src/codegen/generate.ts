@@ -1,4 +1,4 @@
-import { CrudError } from "../errors.ts";
+import { CrudError, describeUrl } from "../errors.ts";
 import type { JsonObject, Manifest, Resource } from "../manifest.ts";
 
 /** The part of `json-schema-to-typescript`'s `compile` this tool uses. */
@@ -27,7 +27,12 @@ const OPTIONS = {
   additionalProperties: false,
   // Inline `$defs` so two resources never declare the same helper type twice.
   declareExternallyReferenced: false,
+  // The schemas are server-supplied: never read a file or call a URL for a `$ref`.
+  $refOptions: { resolve: { file: false, http: false, external: false } },
 };
+
+/** Keywords the compiler copies into the output verbatim (`tsType`) or uses to name code (`tsEnumNames`). */
+const CODE_KEYWORDS: ReadonlySet<string> = new Set(["tsType", "tsEnumNames"]);
 
 const DATA_KEYWORDS: ReadonlySet<string> = new Set([
   "default",
@@ -36,10 +41,24 @@ const DATA_KEYWORDS: ReadonlySet<string> = new Set([
   "examples",
 ]);
 
+/** Keywords whose object holds schemas under author-chosen names, not keywords. */
+const NAME_MAPS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+]);
+
 /**
- * Drops `title` annotations below the root: the compiler turns each into a
- * named type alias, which would collide across resources (and `Name` says
- * little). A property that is itself called `title` stays.
+ * Prepares a server-supplied schema for the compiler:
+ *
+ * - drops `title` annotations below the root: the compiler turns each into a
+ *   named type alias, which would collide across resources (and `Name` says
+ *   little). A property that is itself called `title` stays;
+ * - drops `tsType` and `tsEnumNames`, which the compiler would write into the
+ *   generated source as code;
+ * - rejects a `$ref` that leaves the document (anything not starting with `#`).
  */
 function withoutTitles(node: unknown, isPropertyMap = false): unknown {
   if (Array.isArray(node)) {
@@ -50,12 +69,25 @@ function withoutTitles(node: unknown, isPropertyMap = false): unknown {
   }
   const out: JsonObject = {};
   for (const [key, value] of Object.entries(node)) {
+    if (!isPropertyMap && CODE_KEYWORDS.has(key)) {
+      continue;
+    }
+    if (
+      !isPropertyMap &&
+      key === "$ref" &&
+      typeof value === "string" &&
+      !value.startsWith("#")
+    ) {
+      throw new CrudError(
+        `the schema has a $ref that leaves the manifest ("${value.slice(0, 80)}"): only "#..." references are supported`,
+      );
+    }
     if (isPropertyMap || key !== "title" || typeof value !== "string") {
       // Data keywords hold values, not schemas: leave them whole.
       out[key] =
         !isPropertyMap && DATA_KEYWORDS.has(key)
           ? value
-          : withoutTitles(value, !isPropertyMap && key === "properties");
+          : withoutTitles(value, !isPropertyMap && NAME_MAPS.has(key));
     }
   }
   return out;
@@ -76,16 +108,7 @@ export function describeSource(source: string): string {
   if (!/^https?:\/\//i.test(source)) {
     return source;
   }
-  try {
-    const url = new URL(source);
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.href;
-  } catch {
-    return source;
-  }
+  return describeUrl(source);
 }
 
 /**

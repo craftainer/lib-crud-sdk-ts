@@ -127,7 +127,7 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     return next({ ...ctx, request: new Request(ctx.request, { headers }) });
   };
   const client = createClient({
-    baseUrl: "/api/crud",
+    baseUrl: `${location.origin}/api/crud`, // absolute: a relative baseUrl throws
     credentials: "same-origin", // sends the session cookie
     cacheScope: () => currentUser.sub, // string, or sync/async function
     onUnauthorized: () => location.assign("/bff/login"),
@@ -164,6 +164,16 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     property.
   - There is no `headers` option: add static headers such as `X-CSRF` with a
     middleware, as above.
+  - **Logout and user switch.** The SDK does not notice that the session
+    changed. On logout, or whenever the `cacheScope` value changes, the app
+    must call `cache.clear()` (the `./cache` object; this also drops the
+    remembered `If-Match` validators and, with `IndexedDbStore`, the persisted
+    entries) and tear down its event streams (call every unsubscribe function
+    that `subscribeEvents` / `invalidateOnEvents` returned, or reload the page), so the next user neither reads the previous
+    user's data nor receives events from the previous user's stream.
+  - `Error.message` is bounded (server `detail` is cut at 200 characters, the
+    URL has no query string); the full text stays on `.detail` / `.errors`.
+    Treat it as a diagnostic, not as text to show to users.
 
 - **Middleware.** > [!WARNING]
   > Middleware must carry context fields through: build the next context with
@@ -243,6 +253,10 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   same manifest `events` object to every subscriber of one stream.
 - A `keepalive_seconds` that is zero, negative or not finite is treated as
   unset: the 15 s default applies (a stream silent for three intervals is dead).
+  The timer keeps running while handlers do and restarts per event, so a
+  handler that takes longer than the dead interval (never settles, say)
+  ends the connection (the hub reconnects). A line or event longer than 1 MiB
+  also ends it.
 - Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
   `IndexedDbStore` keeps an `expiresAt` index (database version 2; a version 1
   database upgrades in place and keeps its entries), deletes every expired

@@ -28,6 +28,7 @@
  */
 import { createParser } from "eventsource-parser";
 import type { EventSourceMessage } from "eventsource-parser";
+import { describeUrl } from "./errors.ts";
 import type { CrudEvent, MaybePromise } from "./interfaces.ts";
 
 /** The manifest's `capabilities.events` object (I1), plain. */
@@ -97,6 +98,8 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const DEFAULT_KEEPALIVE_S = 15;
 const DEAD_AFTER_KEEPALIVES = 3;
+/** Cap on the SSE parser's buffered characters (one unterminated line or event); past it the stream is dropped. */
+const MAX_BUFFER_CHARS = 1024 * 1024;
 /** `setTimeout` clamps a longer delay to 1 ms, which would declare the stream dead at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const ACTIONS: ReadonlySet<unknown> = new Set([
@@ -153,7 +156,7 @@ function warnOnDifferingOptions(
   );
   if (differing.length > 0) {
     console.warn(
-      `crud-sdk: the event hub for ${hub.url} was opened with other events options; ` +
+      `crud-sdk: the event hub for ${describeUrl(hub.url)} was opened with other events options; ` +
         `the first subscriber's win and these are ignored: ${differing.join(", ")}`,
     );
   }
@@ -320,25 +323,49 @@ class Hub {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const pending: EventSourceMessage[] = [];
+      let overflow = false;
       const parser = createParser({
+        maxBufferSize: MAX_BUFFER_CHARS,
         onEvent: (message) => {
           pending.push(message);
         },
+        onError: (error) => {
+          overflow ||= error.type === "max-buffer-size-exceeded";
+        },
       });
+      // Rejects when the connection is aborted (dead-stream timer included),
+      // so a handler that never settles cannot hold the reader loop.
+      const closed = new Promise<never>((_resolve, reject) => {
+        conn.signal.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("event stream closed"));
+          },
+          { once: true },
+        );
+      });
+      closed.catch(() => undefined);
       for (;;) {
         const { done, value } = await reader.read();
         if (done) {
           return;
         }
-        parser.feed(decoder.decode(value, { stream: true }));
         // Any byte, keep-alive comments included, proves the stream is alive.
-        // Handlers may be slow and nothing is read meanwhile, so the timer is
-        // paused while they run and restarts once they are done.
-        clearTimeout(timer);
-        for (const message of pending.splice(0)) {
-          await this.handle(message);
-        }
+        // The timer keeps running while handlers do, and each message gets a
+        // fresh `deadMs` for its handler: a hung handler ends the connection
+        // like a silent stream (the hub reconnects, closing the freshness gate
+        // meanwhile), while a batch of slow-but-finishing handlers does not.
+        // Reconnects are paced by the backoff and by `deadMs` per attempt.
         arm();
+        parser.feed(decoder.decode(value, { stream: true }));
+        for (const message of pending.splice(0)) {
+          arm();
+          await Promise.race([this.handle(message), closed]);
+        }
+        if (overflow) {
+          // Events parsed before the oversized one were handled above.
+          throw new Error("event stream line or event too large");
+        }
       }
     } finally {
       clearTimeout(timer);

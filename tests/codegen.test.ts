@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -351,5 +351,105 @@ describe("generateTypes name checks", () => {
   it("leaves a file source as given", async () => {
     const text = await generateTypes(adminManifest, "./a?b#c.json", compile);
     expect(text).toContain("from ./a?b#c.json (");
+  });
+});
+
+describe("untrusted manifest schemas", () => {
+  function manifestWith(extra: Record<string, unknown>) {
+    const raw = structuredClone(fixture("admin.manifest.json")) as {
+      resources: Array<{
+        schemas: { read: { properties: Record<string, unknown> } };
+      }>;
+    };
+    raw.resources[0]!.schemas.read.properties["extra"] = extra;
+    return parseManifest(raw);
+  }
+
+  it("rejects a $ref that leaves the document, without reading it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "crud-sdk-ref-"));
+    const secret = join(dir, "secret.json");
+    await writeFile(secret, JSON.stringify({ type: "string" }));
+    const compile = await loadCompiler();
+    for (const ref of [
+      `file://${secret}`,
+      secret,
+      "secret.json",
+      "http://169.254.169.254/latest",
+    ]) {
+      await expect(
+        generateTypes(manifestWith({ $ref: ref }), "m", compile),
+      ).rejects.toThrow(CrudError);
+    }
+    await expect(
+      generateTypes(manifestWith({ $ref: secret }), "m", compile),
+    ).rejects.toThrow(/leaves the manifest/);
+  });
+
+  it("keeps a local $ref working", async () => {
+    const compile = await loadCompiler();
+    const text = await generateTypes(
+      manifestWith({
+        $ref: "#/properties/name",
+      }),
+      "m",
+      compile,
+    );
+    expect(text).toMatch(/extra\?: string \| null;/);
+  });
+
+  it("disables the compiler's file and http resolvers", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const compile: Compile = (_schema, name, options) => {
+      seen.push(options);
+      return Promise.resolve(`export interface ${name} {}\n`);
+    };
+    await generateTypes(adminManifest, "m", compile);
+    expect(seen.length).toBeGreaterThan(0);
+    for (const options of seen) {
+      expect(options["$refOptions"]).toEqual({
+        resolve: { file: false, http: false, external: false },
+      });
+    }
+  });
+
+  it("strips tsType and tsEnumNames, but keeps properties named so", async () => {
+    const compile = await loadCompiler();
+    const text = await generateTypes(
+      manifestWith({
+        type: "string",
+        tsType: "Evil",
+        enum: ["a", "b"],
+        tsEnumNames: ["X", "Y"],
+        properties: { tsType: { type: "number" } },
+      }),
+      "m",
+      compile,
+    );
+    expect(text).not.toContain("Evil");
+    expect(text).not.toContain('"X"');
+    const named = await generateTypes(
+      manifestWith({
+        type: "object",
+        properties: { tsType: { type: "number", tsType: "Evil" } },
+      }),
+      "m",
+      compile,
+    );
+    expect(named).toMatch(/tsType\?: number;/);
+    expect(named).not.toContain("Evil");
+  });
+
+  it("keeps definitions named like keywords", async () => {
+    const compile = await loadCompiler();
+    const text = await generateTypes(
+      manifestWith({
+        type: "object",
+        properties: { a: { $ref: "#/properties/extra/$defs/tsType" } },
+        $defs: { tsType: { type: "number" } },
+      }),
+      "m",
+      compile,
+    );
+    expect(text).toMatch(/a\?: number;/);
   });
 });

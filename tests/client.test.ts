@@ -561,6 +561,26 @@ describe("operations", () => {
     }
   });
 
+  it("keeps the query string and credentials out of ResponseError messages", async () => {
+    const { client } = clientFor(admin, () => json("x"));
+    const r = await client.resource("heroes");
+    const error = (await r
+      .list({ filters: { name: "alice@example.com" } })
+      .catch((e: unknown) => e)) as ResponseError;
+    expect(error).toBeInstanceOf(ResponseError);
+    expect(error.message).toContain("expected a JSON array");
+    expect(error.message).not.toContain("alice");
+    expect(error.message).not.toContain("?");
+    const notJson = clientFor(
+      admin,
+      () => new Response("<html>", { status: 200 }),
+    );
+    const handle = await notJson.client.resource("heroes");
+    const bad = (await handle.get(1).catch((e: unknown) => e)) as ResponseError;
+    expect(bad.message).toContain("is not valid JSON");
+    expect(bad.message).not.toContain("?");
+  });
+
   it("still accepts a 204 on a single-record delete", async () => {
     const { client } = clientFor(
       admin,

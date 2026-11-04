@@ -411,7 +411,7 @@ describe("subscribeEvents", () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
-  it("does not count a slow handler as a silent stream", async () => {
+  it("drops the stream when a handler never settles, instead of freezing the reader", async () => {
     vi.useFakeTimers();
     const net = sseFetch();
     const seen: string[] = [];
@@ -420,10 +420,7 @@ describe("subscribeEvents", () => {
       url: URL_,
       events: config, // keepalive 10 s -> dead after 30 s
       random: () => 0,
-      onEvent: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 40_000));
-        seen.push("event done");
-      },
+      onEvent: () => new Promise<void>(() => undefined), // hangs forever
       onStatus: (connected) => {
         seen.push(`status:${connected}`);
       },
@@ -432,14 +429,94 @@ describe("subscribeEvents", () => {
     net.conns[0]!.push(handshake("abc"));
     await vi.advanceTimersByTimeAsync(0);
     net.conns[0]!.push(frame(1, record("update", 1)));
-    await vi.advanceTimersByTimeAsync(40_000); // the handler outlasts the dead timer
-    expect(seen).toEqual(["status:true", "event done"]);
-    expect(net.conns[0]!.signal?.aborted).toBe(false);
-    expect(net.conns).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(29_999); // the timer restarts after the handler
+    await vi.advanceTimersByTimeAsync(29_999); // the timer is not paused by the handler
     expect(net.conns[0]!.signal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(net.conns[0]!.signal?.aborted).toBe(true);
+    expect(seen).toEqual(["status:true", "status:false"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(net.conns).toHaveLength(2); // reconnected
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("gives each handler of a batch its own dead-stream budget", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const done: number[] = [];
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config, // keepalive 10 s -> dead after 30 s
+      random: () => 0,
+      onEvent: async (event) => {
+        await new Promise((resolve) => setTimeout(resolve, 20_000));
+        done.push(event.recordId);
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(handshake("abc"));
+    await vi.advanceTimersByTimeAsync(0);
+    // Two events in one chunk: 40 s of handlers, each under the 30 s limit.
+    net.conns[0]!.push(
+      frame(1, record("update", 1)) + frame(2, record("update", 2)),
+    );
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(done).toEqual([1, 2]);
+    expect(net.conns[0]!.signal?.aborted).toBe(false);
+    expect(net.conns).toHaveLength(1);
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("handles the events before an oversized line, then drops the stream", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const c = collect();
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      random: () => 0,
+      ...c.handlers,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(handshake("abc"));
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(
+      frame(1, record("update", 1)) + "data: " + "x".repeat(2 * 1024 * 1024),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(c.log).toContain("event:update:1");
+    expect(net.conns[0]!.signal?.aborted).toBe(true);
+    stop();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("drops the stream when one line outgrows the parser buffer", async () => {
+    vi.useFakeTimers();
+    const net = sseFetch();
+    const c = collect();
+    const stop = subscribeEvents({
+      fetch: net.fn,
+      url: URL_,
+      events: config,
+      random: () => 0,
+      ...c.handlers,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    net.conns[0]!.push(handshake("abc"));
+    await vi.advanceTimersByTimeAsync(0);
+    const chunk = "data: " + "x".repeat(256 * 1024); // never ends the line
+    for (let i = 0; i < 4; i += 1) {
+      expect(net.conns[0]!.signal?.aborted).toBe(false); // 3 x 256 KiB fit
+      net.conns[0]!.push(chunk);
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(net.conns[0]!.signal?.aborted).toBe(true);
+    expect(c.log).toEqual(["reset", "status:true", "status:false"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(net.conns).toHaveLength(2);
     stop();
     await vi.advanceTimersByTimeAsync(0);
   });
