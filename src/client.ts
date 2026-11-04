@@ -7,6 +7,7 @@ import {
   InsecureTransportError,
   InvalidQueryError,
   ManifestError,
+  describeUrl,
   ResponseError,
   UnknownResourceError,
   problemFromResponse,
@@ -437,7 +438,7 @@ export class ResourceClient<
     const body = await this.#transport.json(call, options.signal);
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
       throw new ResponseError(
-        `${call.method} ${call.url}: expected a JSON object, got ${shapeOf(body)}`,
+        `${call.method} ${describeUrl(call.url)}: expected a JSON object, got ${shapeOf(body)}`,
       );
     }
     return body as T;
@@ -447,7 +448,7 @@ export class ResourceClient<
     const body = await this.#transport.json(call, options.signal);
     if (!Array.isArray(body)) {
       throw new ResponseError(
-        `${call.method} ${call.url}: expected a JSON array, got ${shapeOf(body)}`,
+        `${call.method} ${describeUrl(call.url)}: expected a JSON array, got ${shapeOf(body)}`,
       );
     }
     return body as T[];
@@ -699,7 +700,7 @@ export class CrudClient {
           return (await response.json()) as unknown;
         } catch (error) {
           throw new ResponseError(
-            `${call.method} ${call.url}: the ${response.status} response body is not valid JSON`,
+            `${call.method} ${describeUrl(call.url)}: the ${response.status} response body is not valid JSON`,
             { cause: error },
           );
         }
@@ -893,7 +894,9 @@ export class CrudClient {
     try {
       return (await response.json()) as unknown;
     } catch (error) {
-      throw new ManifestError(`${url} is not JSON`, { cause: error });
+      throw new ManifestError(`${describeUrl(url)} is not JSON`, {
+        cause: error,
+      });
     }
   }
 

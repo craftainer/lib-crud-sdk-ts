@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (implemented in 0.8.0)
 
 ## Context
 
@@ -27,9 +27,12 @@ response, `no-store` included.
   `no-store` response stays out of every store.
 - A newer response replaces it. It is dropped by every clear that drops the
   record entry (a write, `412`, `404`/`410`, `DELETE`, an SSE event,
-  `clearResource`, `clear`), by a `200` or write answer without an `ETag`,
-  and wholesale when the caller scope (`cacheScope` or the credential scope)
-  differs from the last one the cache saw.
+  `clearResource`, `clear`) and by a `200` or write answer without an `ETag`.
+  A change of caller scope does not wipe it: the key carries the scope, so a
+  validator is only ever read back under the scope that stored it (an earlier
+  revision dropped the whole map on a scope change; that wipe was removed).
+  Entries of an earlier scope stay until LRU eviction or `cache.clear()`, so
+  an app that switches user calls `cache.clear()` (see the README).
 - It is an LRU of 1024 entries, the `MemoryStore` default.
 - No new export and no option: it is active whenever the resource's policy has
   `etag` on, as the stored ETag already was.
@@ -41,7 +44,8 @@ response, `no-store` included.
 - A validator is a few bytes per record, held in memory for the life of the
   cache object (not persisted, unlike IndexedDB entries), so a reload loses it
   until the record is read again.
-- A scope switch drops every remembered validator, so with two scopes
-  alternating, a `PATCH` may go without `If-Match` until the record is read
-  again; this fails safe (the server then applies its own rules).
+- A scope switch keeps the validators of the other scope under their own
+  keys, so alternating scopes do not cost a `PATCH` its `If-Match`. They are
+  not served across scopes, but they stay in memory until eviction or
+  `cache.clear()`.
 - Weak ETags are sent as stored, as before.

@@ -13,6 +13,7 @@ import {
   ValidationFailed,
   problemFromResponse,
 } from "../src/index.ts";
+import { describeUrl } from "../src/errors.ts";
 
 const problem = (
   status: number,
@@ -165,5 +166,45 @@ describe("problemFromResponse", () => {
     expect(error.headers).toBeInstanceOf(Headers);
     expect(error.errors).toEqual([]);
     expect(error.type).toBe("about:blank");
+  });
+});
+
+describe("bounded messages", () => {
+  it("truncates a long detail in the message but keeps it whole on .detail", async () => {
+    const detail = "SELECT secret " + "x".repeat(5000);
+    const error = await problem(500, { detail });
+    expect(error.detail).toBe(detail);
+    expect(error.message.length).toBeLessThan(300);
+    expect(error.message.startsWith("500 Internal Server Error: SELECT")).toBe(
+      true,
+    );
+    expect(error.message.endsWith("...")).toBe(true);
+  });
+
+  it("truncates a long validation list in the message", async () => {
+    const error = await problem(422, {
+      detail: [{ loc: ["body"], msg: "m".repeat(5000), type: "t" }],
+    });
+    expect(error.errors[0]!.msg).toHaveLength(5000);
+    expect(error.message.length).toBeLessThan(300);
+  });
+
+  it("leaves a short detail alone", async () => {
+    expect((await problem(400, { detail: "bad" })).message).toBe(
+      "400 Bad Request: bad",
+    );
+  });
+});
+
+describe("describeUrl", () => {
+  it("drops credentials, query and fragment", () => {
+    expect(describeUrl("https://u:p@h.test/api/x?email=a@b.c#frag")).toBe(
+      "https://h.test/api/x",
+    );
+  });
+
+  it("cuts a string that is not a URL at the first ? or #", () => {
+    expect(describeUrl("/rel/path?email=a@b.c")).toBe("/rel/path");
+    expect(describeUrl("/rel#x")).toBe("/rel");
   });
 });

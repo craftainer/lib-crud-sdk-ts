@@ -60,6 +60,32 @@ export interface ProblemInit {
 
 const NO_TYPE = "about:blank";
 
+/** Longest server-supplied text kept in `Error.message`; the full value stays on `detail` / `errors`. */
+const MAX_MESSAGE_TEXT = 200;
+
+function clip(text: string): string {
+  return text.length > MAX_MESSAGE_TEXT
+    ? `${text.slice(0, MAX_MESSAGE_TEXT)}...`
+    : text;
+}
+
+/**
+ * A URL for an error message: no credentials, query or fragment (filter values
+ * can be personal data and error messages travel to toasts and telemetry).
+ */
+export function describeUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return url.replace(/[?#].*$/s, "");
+  }
+}
+
 /** An error response, as RFC 9457 problem details. */
 export class ProblemError extends CrudError {
   readonly status: number;
@@ -75,9 +101,9 @@ export class ProblemError extends CrudError {
     const errors = init.errors ?? [];
     let message = `${init.status} ${init.title}`;
     if (init.detail) {
-      message += `: ${init.detail}`;
+      message += `: ${clip(init.detail)}`;
     } else if (errors.length > 0) {
-      message += `: ${errors.map((e) => `${e.loc.join(".")}: ${e.msg}`).join("; ")}`;
+      message += `: ${clip(errors.map((e) => `${e.loc.join(".")}: ${e.msg}`).join("; "))}`;
     }
     super(message);
     this.status = init.status;

@@ -97,6 +97,8 @@ const BACKOFF_START_MS = 1000;
 const BACKOFF_MAX_MS = 30_000;
 const DEFAULT_KEEPALIVE_S = 15;
 const DEAD_AFTER_KEEPALIVES = 3;
+/** Cap on the SSE parser's buffered characters (one unterminated line or event); past it the stream is dropped. */
+const MAX_BUFFER_CHARS = 1024 * 1024;
 /** `setTimeout` clamps a longer delay to 1 ms, which would declare the stream dead at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const ACTIONS: ReadonlySet<unknown> = new Set([
@@ -320,25 +322,45 @@ class Hub {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const pending: EventSourceMessage[] = [];
+      let overflow = false;
       const parser = createParser({
+        maxBufferSize: MAX_BUFFER_CHARS,
         onEvent: (message) => {
           pending.push(message);
         },
+        onError: (error) => {
+          overflow ||= error.type === "max-buffer-size-exceeded";
+        },
       });
+      // Rejects when the connection is aborted (dead-stream timer included),
+      // so a handler that never settles cannot hold the reader loop.
+      const closed = new Promise<never>((_resolve, reject) => {
+        conn.signal.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("event stream closed"));
+          },
+          { once: true },
+        );
+      });
+      closed.catch(() => undefined);
       for (;;) {
         const { done, value } = await reader.read();
         if (done) {
           return;
         }
-        parser.feed(decoder.decode(value, { stream: true }));
         // Any byte, keep-alive comments included, proves the stream is alive.
-        // Handlers may be slow and nothing is read meanwhile, so the timer is
-        // paused while they run and restarts once they are done.
-        clearTimeout(timer);
-        for (const message of pending.splice(0)) {
-          await this.handle(message);
-        }
+        // The timer keeps running while handlers do: a hung handler ends the
+        // connection like a silent stream, and the hub reconnects (closing the
+        // freshness gate meanwhile).
         arm();
+        parser.feed(decoder.decode(value, { stream: true }));
+        if (overflow) {
+          throw new Error("event stream line or event too large");
+        }
+        for (const message of pending.splice(0)) {
+          await Promise.race([this.handle(message), closed]);
+        }
       }
     } finally {
       clearTimeout(timer);
