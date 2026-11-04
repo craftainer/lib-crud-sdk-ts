@@ -82,7 +82,9 @@ export function describeUrl(url: string): string {
     parsed.hash = "";
     return parsed.href;
   } catch {
-    return url.replace(/[?#].*$/s, "");
+    return url
+      .replace(/[?#].*$/s, "")
+      .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/]*@/i, "$1");
   }
 }
 
@@ -99,7 +101,7 @@ export class ProblemError extends CrudError {
 
   constructor(init: ProblemInit) {
     const errors = init.errors ?? [];
-    let message = `${init.status} ${init.title}`;
+    let message = `${init.status} ${clip(init.title)}`;
     if (init.detail) {
       message += `: ${clip(init.detail)}`;
     } else if (errors.length > 0) {

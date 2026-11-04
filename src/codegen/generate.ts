@@ -1,4 +1,4 @@
-import { CrudError } from "../errors.ts";
+import { CrudError, describeUrl } from "../errors.ts";
 import type { JsonObject, Manifest, Resource } from "../manifest.ts";
 
 /** The part of `json-schema-to-typescript`'s `compile` this tool uses. */
@@ -41,6 +41,15 @@ const DATA_KEYWORDS: ReadonlySet<string> = new Set([
   "examples",
 ]);
 
+/** Keywords whose object holds schemas under author-chosen names, not keywords. */
+const NAME_MAPS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+]);
+
 /**
  * Prepares a server-supplied schema for the compiler:
  *
@@ -78,7 +87,7 @@ function withoutTitles(node: unknown, isPropertyMap = false): unknown {
       out[key] =
         !isPropertyMap && DATA_KEYWORDS.has(key)
           ? value
-          : withoutTitles(value, !isPropertyMap && key === "properties");
+          : withoutTitles(value, !isPropertyMap && NAME_MAPS.has(key));
     }
   }
   return out;
@@ -99,16 +108,7 @@ export function describeSource(source: string): string {
   if (!/^https?:\/\//i.test(source)) {
     return source;
   }
-  try {
-    const url = new URL(source);
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.href;
-  } catch {
-    return source;
-  }
+  return describeUrl(source);
 }
 
 /**

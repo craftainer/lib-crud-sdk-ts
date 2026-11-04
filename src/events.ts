@@ -28,6 +28,7 @@
  */
 import { createParser } from "eventsource-parser";
 import type { EventSourceMessage } from "eventsource-parser";
+import { describeUrl } from "./errors.ts";
 import type { CrudEvent, MaybePromise } from "./interfaces.ts";
 
 /** The manifest's `capabilities.events` object (I1), plain. */
@@ -155,7 +156,7 @@ function warnOnDifferingOptions(
   );
   if (differing.length > 0) {
     console.warn(
-      `crud-sdk: the event hub for ${hub.url} was opened with other events options; ` +
+      `crud-sdk: the event hub for ${describeUrl(hub.url)} was opened with other events options; ` +
         `the first subscriber's win and these are ignored: ${differing.join(", ")}`,
     );
   }
@@ -350,16 +351,20 @@ class Hub {
           return;
         }
         // Any byte, keep-alive comments included, proves the stream is alive.
-        // The timer keeps running while handlers do: a hung handler ends the
-        // connection like a silent stream, and the hub reconnects (closing the
-        // freshness gate meanwhile).
+        // The timer keeps running while handlers do, and each message gets a
+        // fresh `deadMs` for its handler: a hung handler ends the connection
+        // like a silent stream (the hub reconnects, closing the freshness gate
+        // meanwhile), while a batch of slow-but-finishing handlers does not.
+        // Reconnects are paced by the backoff and by `deadMs` per attempt.
         arm();
         parser.feed(decoder.decode(value, { stream: true }));
-        if (overflow) {
-          throw new Error("event stream line or event too large");
-        }
         for (const message of pending.splice(0)) {
+          arm();
           await Promise.race([this.handle(message), closed]);
+        }
+        if (overflow) {
+          // Events parsed before the oversized one were handled above.
+          throw new Error("event stream line or event too large");
         }
       }
     } finally {

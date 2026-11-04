@@ -438,4 +438,18 @@ describe("untrusted manifest schemas", () => {
     expect(named).toMatch(/tsType\?: number;/);
     expect(named).not.toContain("Evil");
   });
+
+  it("keeps definitions named like keywords", async () => {
+    const compile = await loadCompiler();
+    const text = await generateTypes(
+      manifestWith({
+        type: "object",
+        properties: { a: { $ref: "#/properties/extra/$defs/tsType" } },
+        $defs: { tsType: { type: "number" } },
+      }),
+      "m",
+      compile,
+    );
+    expect(text).toMatch(/a\?: number;/);
+  });
 });

@@ -181,6 +181,12 @@ describe("bounded messages", () => {
     expect(error.message.endsWith("...")).toBe(true);
   });
 
+  it("truncates a long title in the message", () => {
+    const error = new ProblemError({ status: 500, title: "t".repeat(5000) });
+    expect(error.message.length).toBeLessThan(300);
+    expect(error.title).toHaveLength(5000);
+  });
+
   it("truncates a long validation list in the message", async () => {
     const error = await problem(422, {
       detail: [{ loc: ["body"], msg: "m".repeat(5000), type: "t" }],
@@ -206,5 +212,6 @@ describe("describeUrl", () => {
   it("cuts a string that is not a URL at the first ? or #", () => {
     expect(describeUrl("/rel/path?email=a@b.c")).toBe("/rel/path");
     expect(describeUrl("/rel#x")).toBe("/rel");
+    expect(describeUrl("http://u:secret@[bad/p?x=1")).toBe("http://[bad/p");
   });
 });
