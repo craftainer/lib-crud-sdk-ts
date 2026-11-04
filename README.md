@@ -253,7 +253,8 @@ events }), "heroes")`; `fetch` must be authenticated. Events invalidate and
   same manifest `events` object to every subscriber of one stream.
 - A `keepalive_seconds` that is zero, negative or not finite is treated as
   unset: the 15 s default applies (a stream silent for three intervals is dead).
-  The timer keeps running while handlers do, so a handler that never settles
+  The timer keeps running while handlers do and restarts per event, so a
+  handler that takes longer than the dead interval (never settles, say)
   ends the connection (the hub reconnects). A line or event longer than 1 MiB
   also ends it.
 - Stores: `MemoryStore` (LRU) and `IndexedDbStore` (store failures are a miss).
