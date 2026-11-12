@@ -31,7 +31,7 @@ in but not authorised makes a redirect-to-login callback loop forever.
   `middleware` and `use()` reject tagged functions with `ClientError`. We
   considered keeping a late `use(cache.middleware)` working with a deprecation
   warning, but a cache added after construction escapes the check, which
-  defeats the guarantee. Rejecting is fail closed and the fix is mechanical.
+  defeats the guarantee. Rejecting keeps the guarantee and the fix is mechanical. The check is by marker, so a wrapped or rebuilt copy of the cache middleware (a lambda calling `cache.middleware`, `.bind`, `composeMiddleware`) is not detected; that is documented misuse, not covered.
 - `onUnauthorized(response, { attempt, url })`: `attempt` is the 1-based count
   of final `401`s the client has seen, `url` the request URL without query or
   fragment. Only the first `401` calls the callback; later and concurrent ones
@@ -45,6 +45,9 @@ in but not authorised makes a redirect-to-login callback loop forever.
   clients without a scope (cookie or anonymous) must migrate; see the README.
   An anonymous client moving to `cacheScope: "shared"` changes its key prefix
   (`anon` to `s:shared`), so a persisted cache starts cold once.
+- A client with no `tokenProvider` that sets `Authorization` in its own middleware must still pass `cacheScope`; use the caller's identity, not `"shared"`, there.
+- A `tokenProvider` that returns `null` for a cookie-authenticated user, with `credentials` unset, is not detected as a cookie client.
+- `onUnauthorized` is not re-armed after a successful re-login; an app that must react again after a login without a reload needs its own handling.
 - The scope check covers the common mistake, not every one: a host can still
   pass a constant `cacheScope` for a multi-user app.
 - Because suppression is per client, `attempt` seen by the callback is 1; the

@@ -163,8 +163,8 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     ("one page load" = the module/client lifetime in the browser; a reload or
     a new client starts over), including concurrent `401`s, so a
     redirect-to-login loop for a signed-in but unauthorised user cannot fire
-    it again. A suppressed `401` still rejects with `Unauthorized`. The
-    callback gets a clone of the response. The call then still rejects with `Unauthorized`; if
+    it again. It gets a clone of the response. The call (suppressed or not)
+    still rejects with `Unauthorized`; if
     the callback throws, its error is the `Unauthorized`'s `cause`, or, when
     the problem already has a `cause`, a non-enumerable `onUnauthorizedError`
     property.

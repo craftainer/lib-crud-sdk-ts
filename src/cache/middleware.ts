@@ -862,8 +862,10 @@ export function createCache(options: CacheOptions): Cache {
     return entry?.etag;
   };
 
-  Object.defineProperty(middleware, CACHE_MIDDLEWARE, { value: true });
-  Object.defineProperty(autoIfMatch, CACHE_MIDDLEWARE, { value: true });
+  // Every middleware this cache hands out is tagged here, in one place.
+  for (const tagged of [middleware, autoIfMatch]) {
+    Object.defineProperty(tagged, CACHE_MIDDLEWARE, { value: true });
+  }
 
   return {
     middleware,

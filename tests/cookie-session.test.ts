@@ -591,18 +591,17 @@ describe("cache option: cookie clients need a cache scope", () => {
     ).toThrow(ClientError);
   });
 
-  it("keeps the cache innermost, after use() middleware", async () => {
-    const order: string[] = [];
-    const client = make({
-      cacheScope: "shared",
-      fetch: fakeFetch(() => json(manifest)).fetch,
-      manifestUrl: `${BASE}/m`,
-    });
+  it("wires the cache innermost: a use() middleware does not see its If-None-Match", async () => {
+    const { client, seen } = setup({ user: "ada" }, { cacheScope: "ada" });
+    const outer: Array<string | null> = [];
     client.use((ctx, next) => {
-      order.push("use");
+      outer.push(ctx.request.headers.get("if-none-match"));
       return next(ctx);
     });
-    await client.manifest();
-    expect(order).toEqual(["use"]);
+    const heroes = await client.resource("heroes");
+    await heroes.list();
+    await heroes.list();
+    expect(seen.at(-1)?.headers.get("if-none-match")).toBe('"ada"'); // cache is wired
+    expect(outer.every((value) => value === null)).toBe(true); // and sits inside
   });
 });
