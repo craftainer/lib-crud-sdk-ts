@@ -47,7 +47,8 @@ function setup(
     manifestUrl: `${BASE}/m`,
     fetch,
     credentials: "same-origin",
-    middleware: [csrf, ...(withCache ? [cache.middleware] : [])],
+    middleware: [csrf],
+    ...(withCache ? { cache } : {}),
     ...options,
   });
   return { client, seen, cache };
@@ -69,13 +70,21 @@ describe("cookie session: credentials and a static header", () => {
   });
 
   it("leaves credentials to the platform when not set", async () => {
-    const { client, seen } = setup({ user: "ada" }, { credentials: undefined });
+    const { client, seen } = setup(
+      { user: "ada" },
+      { credentials: undefined },
+      false,
+    );
     await (await client.resource("heroes")).list();
     expect(seen[0]?.request.credentials).toBe("same-origin"); // the Request default
   });
 
   it("passes other credentials modes through", async () => {
-    const { client, seen } = setup({ user: "ada" }, { credentials: "include" });
+    const { client, seen } = setup(
+      { user: "ada" },
+      { credentials: "include" },
+      false,
+    );
     await (await client.resource("heroes")).list();
     expect(seen.at(-1)?.request.credentials).toBe("include");
   });
@@ -179,13 +188,14 @@ describe("cacheScope", () => {
           },
         ],
       },
+      false,
     );
     await client.manifest();
     expect(seenScopes).toEqual([undefined]);
   });
 
   it("without the option the scope is still the token's", async () => {
-    const { client } = setup({ user: "a" }, { credentials: undefined });
+    const { client } = setup({ user: "a" }, { credentials: undefined }, false);
     expect(await client.scope()).toBe("anon");
   });
 });
@@ -251,9 +261,9 @@ describe("HTTP cache isolation under cookie sessions", () => {
     expect(seen.at(-1)?.headers.get("if-none-match")).toBe('"ada"');
   });
 
-  it("without cacheScope, cookie sessions share the anon scope (why the option exists)", async () => {
+  it('cacheScope: "shared" is the explicit opt-out: callers share entries', async () => {
     const session = { user: "ada" };
-    const { client, seen } = setup(session, { credentials: "same-origin" });
+    const { client, seen } = setup(session, { cacheScope: "shared" });
     const heroes = await client.resource("heroes");
     await heroes.list();
     session.user = "grace";
@@ -302,7 +312,7 @@ describe("HTTP cache isolation under cookie sessions", () => {
       manifestUrl: `${BASE}/m`,
       fetch,
       cacheScope: () => scope,
-      middleware: [cache.middleware, cache.autoIfMatch],
+      cache,
     });
     const heroes = await client.resource("heroes");
     await heroes.get(7);
@@ -379,7 +389,7 @@ describe("onUnauthorized", () => {
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
 
-  it("fires per final 401 response: two calls, two firings", async () => {
+  it("passes { attempt, url } and suppresses repeats for the client's lifetime", async () => {
     const onUnauthorized = vi.fn();
     const { fetch } = fakeFetch((r) =>
       r.url === `${BASE}/m` ? json(manifest) : unauthorized(),
@@ -392,13 +402,92 @@ describe("onUnauthorized", () => {
     });
     const heroes = await client.resource("heroes");
     await heroes.list().catch(() => undefined);
-    await heroes.get(1).catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    expect(onUnauthorized).toHaveBeenCalledWith(expect.any(Response), {
+      attempt: 1,
+      url: expect.stringContaining(BASE),
+    });
+    // A suppressed 401 still rejects (fail closed); only the callback is skipped.
+    const again = await heroes.get(1).catch((e: unknown) => e);
+    expect(again).toBeInstanceOf(Unauthorized);
+    await heroes.list().catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses concurrent 401s too and strips the query from url", async () => {
+    const onUnauthorized = vi.fn();
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m` ? json(manifest) : unauthorized(),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      onUnauthorized,
+    });
+    const heroes = await client.resource("heroes");
+    const results = await Promise.allSettled([
+      heroes.list({ limit: 5 }),
+      heroes.get(1),
+      heroes.get(2),
+    ]);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    const info = onUnauthorized.mock.calls[0]?.[1] as { url: string };
+    expect(info.url).not.toContain("?");
+  });
+
+  it("re-arms on the next 2xx; attempt counts invocations across re-arms", async () => {
+    const onUnauthorized = vi.fn();
+    let status = 401;
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m`
+        ? json(manifest)
+        : status === 401
+          ? unauthorized()
+          : json([{ id: 1 }]),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      onUnauthorized,
+    });
+    const heroes = await client.resource("heroes"); // manifest 2xx
+    await heroes.list().catch(() => undefined);
+    await heroes.list().catch(() => undefined); // loop: no 2xx in between
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    status = 200; // re-login
+    await heroes.list();
+    status = 401; // the session expires again
+    await heroes.list().catch(() => undefined);
+    await heroes.list().catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
+    expect(onUnauthorized.mock.calls.map((call) => call[1].attempt)).toEqual([
+      1, 2,
+    ]);
+  });
+
+  it("a separate client has its own count", async () => {
+    const onUnauthorized = vi.fn();
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m` ? json(manifest) : unauthorized(),
+    );
+    for (let i = 0; i < 2; i += 1) {
+      const heroes = await createClient({
+        baseUrl: BASE,
+        manifestUrl: `${BASE}/m`,
+        fetch,
+        onUnauthorized,
+      }).resource("heroes");
+      await heroes.list().catch(() => undefined);
+    }
     expect(onUnauthorized).toHaveBeenCalledTimes(2);
   });
 
   it("is not called for other statuses; a throwing callback becomes the cause of Unauthorized", async () => {
     const onUnauthorized = vi.fn();
-    const ok = setup({ user: "a" }, { onUnauthorized });
+    const ok = setup({ user: "a" }, { onUnauthorized, cacheScope: "a" });
     await (await ok.client.resource("heroes")).list();
     expect(onUnauthorized).not.toHaveBeenCalled();
 
@@ -467,7 +556,8 @@ describe("tokenProvider-only clients are unchanged", () => {
         }
         return token;
       },
-      middleware: [spy, cache.middleware],
+      middleware: [spy],
+      cache,
     });
     expect(await client.scope()).toBe(T1);
     const heroes = await client.resource("heroes");
@@ -480,5 +570,69 @@ describe("tokenProvider-only clients are unchanged", () => {
       { scope: T2, has: false },
     ]);
     expect(keys).toEqual([`v1/heroes/list/_/v2/${T2}/`]);
+  });
+});
+
+describe("cache option: cookie clients need a cache scope", () => {
+  const cacheOf = () =>
+    createCache({
+      store: new MemoryStore(),
+      policies: {
+        heroes: cachePolicyFromManifest(manifest.resources[0] as never),
+      },
+    });
+  const make = (options: Partial<ClientOptions>) =>
+    createClient({ baseUrl: BASE, cache: cacheOf(), ...options });
+
+  it.each<[string, Partial<ClientOptions>]>([
+    [
+      "credentials same-origin with a token",
+      { credentials: "same-origin" as const, tokenProvider: () => "t" },
+    ],
+    [
+      "credentials include with a token",
+      { credentials: "include" as const, tokenProvider: () => "t" },
+    ],
+    ["no tokenProvider", {}],
+  ])("throws ClientError naming shared for %s", (_name, options) => {
+    expect(() => make(options)).toThrow(ClientError);
+    expect(() => make(options)).toThrow(/cacheScope: "shared"/);
+  });
+
+  it("is accepted with cacheScope (incl. shared), or for a token client", () => {
+    expect(() => make({ cacheScope: "shared" })).not.toThrow();
+    expect(() => make({ cacheScope: () => "sub" })).not.toThrow();
+    expect(() =>
+      make({ tokenProvider: () => "t", credentials: "omit" }),
+    ).not.toThrow();
+    expect(() => make({ tokenProvider: () => "t" })).not.toThrow();
+  });
+
+  it("does not apply without a cache", () => {
+    expect(() => createClient({ baseUrl: BASE })).not.toThrow();
+  });
+
+  it("rejects the cache middleware in middleware and use()", () => {
+    const cache = cacheOf();
+    expect(() =>
+      createClient({ baseUrl: BASE, middleware: [cache.middleware] }),
+    ).toThrow(/createClient\(\{ cache \}\)/);
+    expect(() =>
+      createClient({ baseUrl: BASE }).use(cache.autoIfMatch),
+    ).toThrow(ClientError);
+  });
+
+  it("wires the cache innermost: a use() middleware does not see its If-None-Match", async () => {
+    const { client, seen } = setup({ user: "ada" }, { cacheScope: "ada" });
+    const outer: Array<string | null> = [];
+    client.use((ctx, next) => {
+      outer.push(ctx.request.headers.get("if-none-match"));
+      return next(ctx);
+    });
+    const heroes = await client.resource("heroes");
+    await heroes.list();
+    await heroes.list();
+    expect(seen.at(-1)?.headers.get("if-none-match")).toBe('"ada"'); // cache is wired
+    expect(outer.every((value) => value === null)).toBe(true); // and sits inside
   });
 });

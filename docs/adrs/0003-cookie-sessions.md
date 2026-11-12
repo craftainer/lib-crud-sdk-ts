@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. Amended by [0005](0005-cache-option-and-scope-required.md): a cookie client with a cache must set `cacheScope`, and `onUnauthorized` fires once per client.
 
 ## Context
 

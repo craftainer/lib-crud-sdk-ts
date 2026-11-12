@@ -131,7 +131,8 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
     credentials: "same-origin", // sends the session cookie
     cacheScope: () => currentUser.sub, // string, or sync/async function
     onUnauthorized: () => location.assign("/bff/login"),
-    middleware: [csrf, cache.middleware],
+    middleware: [csrf],
+    cache,
   });
   ```
 
@@ -154,14 +155,21 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   - `credentials: "include"` over plain `http:` to a
     non-loopback host is refused with `InsecureTransportError`, like an
     `Authorization` header (`allowInsecureHttp: true` opts in).
-  - `onUnauthorized(response)` is awaited on each final `401` response, after
-    the `tokenProvider` refresh retry (if any); manifest and discovery
-    requests included. A call that makes several requests can fire it more
-    than once, so make it idempotent (for example a navigation). It gets a
-    clone of the response. The call then still rejects with `Unauthorized`; if
-    the callback throws, its error is the `Unauthorized`'s `cause`, or, when
-    the problem already has a `cause`, a non-enumerable `onUnauthorizedError`
-    property.
+  - `onUnauthorized(response, { attempt, url })` is awaited on a final `401`
+    response, after the `tokenProvider` refresh retry (if any); manifest and
+    discovery requests included. `attempt` is the 1-based count of callback
+    invocations over the client's lifetime and `url` the request URL without
+    query or fragment. **Repeats are suppressed**: after a call, later and
+    concurrent `401`s skip the callback until a request succeeds (a `2xx`
+    response) and re-arms it. A redirect-to-login loop for a signed-in but
+    unauthorised user never sees a `2xx`, so it fires once; after a re-login
+    without a reload, a later expiry fires again with `attempt` 2, which a
+    host can use to spot repeated bounces. "One page load" = the module/client
+    lifetime in the browser; a reload or a new client starts over. It gets a
+    clone of the response. The call (suppressed or not) still rejects with
+    `Unauthorized`; if the callback throws, its error is the `Unauthorized`'s
+    `cause`, or, when the problem already has a `cause`, a non-enumerable
+    `onUnauthorizedError` property.
   - There is no `headers` option: add static headers such as `X-CSRF` with a
     middleware, as above.
   - **Logout and user switch.** The SDK does not notice that the session
@@ -174,6 +182,26 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   - `Error.message` is bounded (server `detail` is cut at 200 characters, the
     URL has no query string); the full text stays on `.detail` / `.errors`.
     Treat it as a diagnostic, not as text to show to users.
+
+  - **Cache scope required (0.9).** A client with `cache` that is a _cookie
+    client_ (`credentials` `"include"` or `"same-origin"`, **or** no
+    `tokenProvider`) throws `ClientError` at construction unless it sets
+    `cacheScope`. Such a client sends no per-user `Authorization` header, so
+    without a scope every caller would share one cache. Set `cacheScope` to
+    the caller's identity, or to `"shared"` when the data is the same for
+    everyone.
+  - **Migration (0.8 to 0.9).**
+    1. Replace `middleware: [..., cache.middleware, cache.autoIfMatch]` with
+       `cache` (and keep your other middleware in `middleware`); the cache is
+       always innermost. A late `client.use(cache.middleware)` is rejected,
+       because the scope check could not run at construction.
+    2. A cookie-session client already sets `cacheScope`; check nothing else.
+    3. An anonymous public client with a cache (no `tokenProvider`) must add
+       `cacheScope: "shared"`; its behaviour is unchanged (it already shared
+       the `anon` scope, now under `s:shared`, so a persisted cache is cold
+       once).
+    4. A token client (`tokenProvider`, no cookie `credentials`) needs no
+       scope.
 
 - **Middleware.** > [!WARNING]
   > Middleware must carry context fields through: build the next context with
@@ -210,10 +238,12 @@ naming them.
 
 ## Caching / TanStack
 
-`createCache({ store, policies })` (from `./cache`) returns two `Middleware`:
-`cache.middleware` and `cache.autoIfMatch`. Put both **innermost**, after
-whatever sets `Authorization`: unless `createClient({ cacheScope })` is set
-(then that scope is used), the cache scope is `anon` without an
+`createCache({ store, policies })` (from `./cache`) returns a `Cache` with two
+`Middleware`, `cache.middleware` and `cache.autoIfMatch`. Pass the cache as
+`createClient({ cache })`: the client wires both itself, **innermost**, after
+whatever sets `Authorization`. Adding `cache.middleware` or
+`cache.autoIfMatch` to `middleware` or `use()` throws `ClientError`.
+Unless `createClient({ cacheScope })` is set (then that scope is used), the cache scope is `anon` without an
 Authorization header, else the first 32 hex characters of the SHA-256 of the
 whole credential, taken from the request as it is sent. `policies` maps
 manifest resource names to `cachePolicyFromManifest(resource)` (plain I1
@@ -339,7 +369,8 @@ const cache = createCache({
 });
 const client = createClient({
   baseUrl,
-  middleware: [cache.middleware, cache.autoIfMatch],
+  tokenProvider: () => accessToken, // or cacheScope, see "Cache scope required" below
+  cache,
 });
 const api = tanstackApi(client, await client.resource("heroes"));
 useQuery(listOptions(await client.namespace(), "heroes", api, { limit: 50 }));

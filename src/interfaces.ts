@@ -154,3 +154,12 @@ export function composeMiddleware(
   };
   return (ctx) => dispatch(0, ctx);
 }
+
+/**
+ * Marks the middleware `createCache` returns, so the client can refuse them in
+ * `middleware` / `use()` and wire them itself from the `cache` option (where
+ * the cookie-client scope check runs). Internal; not part of the public API.
+ */
+export const CACHE_MIDDLEWARE: unique symbol = Symbol.for(
+  "@craftainer/crud-sdk/cache-middleware",
+) as never;
