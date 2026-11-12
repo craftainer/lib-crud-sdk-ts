@@ -33,11 +33,13 @@ in but not authorised makes a redirect-to-login callback loop forever.
   warning, but a cache added after construction escapes the check, which
   defeats the guarantee. Rejecting keeps the guarantee and the fix is mechanical. The check is by marker, so a wrapped or rebuilt copy of the cache middleware (a lambda calling `cache.middleware`, `.bind`, `composeMiddleware`) is not detected; that is documented misuse, not covered.
 - `onUnauthorized(response, { attempt, url })`: `attempt` is the 1-based count
-  of final `401`s the client has seen, `url` the request URL without query or
-  fragment. Only the first `401` calls the callback; later and concurrent ones
-  are suppressed for the client's lifetime ("one page load" is the
-  module/client lifetime in the browser). A suppressed `401` still rejects
-  with `Unauthorized`. Existing one-argument callbacks keep working.
+  of callback invocations over the client's lifetime, `url` the request URL
+  without query or fragment. After a call, later and concurrent `401`s are
+  suppressed until a `2xx` response re-arms it. A redirect loop sees no `2xx`
+  in between, so it fires once; a re-login without a reload re-arms it, and
+  the next expiry fires with `attempt` 2. "One page load" is the
+  module/client lifetime in the browser. A suppressed `401` still rejects with
+  `Unauthorized`. Existing one-argument callbacks keep working.
 
 ## Consequences
 
@@ -47,11 +49,7 @@ in but not authorised makes a redirect-to-login callback loop forever.
   (`anon` to `s:shared`), so a persisted cache starts cold once.
 - A client with no `tokenProvider` that sets `Authorization` in its own middleware must still pass `cacheScope`; use the caller's identity, not `"shared"`, there.
 - A `tokenProvider` that returns `null` for a cookie-authenticated user, with `credentials` unset, is not detected as a cookie client.
-- `onUnauthorized` is not re-armed after a successful re-login; an app that must react again after a login without a reload needs its own handling.
+- Any `2xx` re-arms `onUnauthorized`, including one from an unrelated request, so a loop that interleaves a successful request (for example a public asset fetched through the client) fires again each cycle; a host that cares keeps its own guard.
 - The scope check covers the common mistake, not every one: a host can still
   pass a constant `cacheScope` for a multi-user app.
-- Because suppression is per client, `attempt` seen by the callback is 1; the
-  counter is still exposed so a host can log it and so the contract can grow
-  (for example a reset) without a signature change. A host that needs a
-  longer-lived guard (surviving reloads) keeps its own, for example in
-  `sessionStorage`.
+- `attempt` counts invocations, so a host can spot repeated bounces across re-logins. A guard that survives reloads (for example in `sessionStorage`) stays the host's job.

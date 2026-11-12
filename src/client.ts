@@ -606,22 +606,23 @@ export interface ClientOptions {
    */
   readonly credentials?: NonNullable<RequestInit["credentials"]> | undefined;
   /**
-   * Called (and awaited) on the first final `401` response of this client,
-   * after the `tokenProvider` refresh retry (if any) has failed to help;
-   * manifest and discovery requests included. It gets a clone of the
-   * response, so its body may be read, and `{ attempt, url }`: `attempt` is
-   * the 1-based count of final `401`s this client has seen, `url` the request
-   * URL without query or fragment.
+   * Called (and awaited) on a final `401` response, after the `tokenProvider`
+   * refresh retry (if any) has failed to help; manifest and discovery requests
+   * included. It gets a clone of the response, so its body may be read, and
+   * `{ attempt, url }`: `attempt` is the 1-based count of callback invocations
+   * over the client's lifetime, `url` the request URL without query or
+   * fragment.
    *
-   * Repeat calls are suppressed: after the first, later `401`s (and
-   * concurrent ones) do not call it again, for the lifetime of the client.
-   * "One page load" means the client (module) lifetime in the browser: a
-   * reload, or a new client, starts over. This stops a redirect-to-login loop
-   * when the user is signed in but not authorised. A suppressed `401` still
-   * rejects with `Unauthorized` (fail closed); only the callback is skipped.
-   * The call still rejects with `Unauthorized` afterwards; if the callback
-   * throws, its error is the `Unauthorized`'s `cause` (or, when the problem
-   * already has a `cause`, a non-enumerable `onUnauthorizedError` property).
+   * Repeats are suppressed: once it has been called, later `401`s (and
+   * concurrent ones) do not call it again until a request succeeds (a `2xx`
+   * response), which re-arms it. A redirect-to-login loop never sees a `2xx`
+   * in between, so it fires once; a re-login without a reload makes a later
+   * expiry fire again, with `attempt` 2, and so on. "One page load" means the
+   * client (module) lifetime in the browser: a reload, or a new client, starts
+   * over. A suppressed `401` still rejects with `Unauthorized` (fail closed);
+   * only the callback is skipped. If the callback throws, its error is the
+   * `Unauthorized`'s `cause` (or, when the problem already has a `cause`, a
+   * non-enumerable `onUnauthorizedError` property).
    * Typical use: navigate to the login page.
    */
   readonly onUnauthorized?:
@@ -706,7 +707,10 @@ export class CrudClient {
   readonly #onUnauthorized: ClientOptions["onUnauthorized"];
   readonly #middleware: Middleware[];
   readonly #cacheMiddleware: readonly Middleware[];
+  /** Callback invocations so far (the `attempt` it is given). */
   #unauthorizedAttempts = 0;
+  /** False between a callback invocation and the next 2xx response. */
+  #unauthorizedArmed = true;
   readonly #manifestUrl: string | undefined;
   readonly #allowedOrigins: readonly string[];
   readonly #allowInsecureHttp: boolean;
@@ -909,12 +913,13 @@ export class CrudClient {
     let callbackError: unknown;
     let callbackFailed = false;
     if (response.status === 401 && this.#onUnauthorized !== undefined) {
-      this.#unauthorizedAttempts += 1;
-      const attempt = this.#unauthorizedAttempts;
       try {
-        if (attempt === 1) {
+        if (this.#unauthorizedArmed) {
+          // Disarmed before the await, so concurrent 401s are suppressed too.
+          this.#unauthorizedArmed = false;
+          this.#unauthorizedAttempts += 1;
           await this.#onUnauthorized(response.clone(), {
-            attempt,
+            attempt: this.#unauthorizedAttempts,
             url: describeUrl(call.url),
           });
         }
@@ -940,6 +945,8 @@ export class CrudClient {
       }
       throw problem;
     }
+    // Not an error status (a 2xx in practice): the session works again, so a later 401 is a new event.
+    this.#unauthorizedArmed = true;
     return response;
   }
 

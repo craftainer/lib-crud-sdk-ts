@@ -437,6 +437,37 @@ describe("onUnauthorized", () => {
     expect(info.url).not.toContain("?");
   });
 
+  it("re-arms on the next 2xx; attempt counts invocations across re-arms", async () => {
+    const onUnauthorized = vi.fn();
+    let status = 401;
+    const { fetch } = fakeFetch((r) =>
+      r.url === `${BASE}/m`
+        ? json(manifest)
+        : status === 401
+          ? unauthorized()
+          : json([{ id: 1 }]),
+    );
+    const client = createClient({
+      baseUrl: BASE,
+      manifestUrl: `${BASE}/m`,
+      fetch,
+      onUnauthorized,
+    });
+    const heroes = await client.resource("heroes"); // manifest 2xx
+    await heroes.list().catch(() => undefined);
+    await heroes.list().catch(() => undefined); // loop: no 2xx in between
+    expect(onUnauthorized).toHaveBeenCalledTimes(1);
+    status = 200; // re-login
+    await heroes.list();
+    status = 401; // the session expires again
+    await heroes.list().catch(() => undefined);
+    await heroes.list().catch(() => undefined);
+    expect(onUnauthorized).toHaveBeenCalledTimes(2);
+    expect(onUnauthorized.mock.calls.map((call) => call[1].attempt)).toEqual([
+      1, 2,
+    ]);
+  });
+
   it("a separate client has its own count", async () => {
     const onUnauthorized = vi.fn();
     const { fetch } = fakeFetch((r) =>

@@ -155,19 +155,21 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   - `credentials: "include"` over plain `http:` to a
     non-loopback host is refused with `InsecureTransportError`, like an
     `Authorization` header (`allowInsecureHttp: true` opts in).
-  - `onUnauthorized(response, { attempt, url })` is awaited on the first final
-    `401` response, after the `tokenProvider` refresh retry (if any); manifest
-    and discovery requests included. `attempt` is the 1-based count of final
-    `401`s the client has seen and `url` the request URL without query or
-    fragment. **Repeats are suppressed** for the lifetime of the client
-    ("one page load" = the module/client lifetime in the browser; a reload or
-    a new client starts over), including concurrent `401`s, so a
-    redirect-to-login loop for a signed-in but unauthorised user cannot fire
-    it again. It gets a clone of the response. The call (suppressed or not)
-    still rejects with `Unauthorized`; if
-    the callback throws, its error is the `Unauthorized`'s `cause`, or, when
-    the problem already has a `cause`, a non-enumerable `onUnauthorizedError`
-    property.
+  - `onUnauthorized(response, { attempt, url })` is awaited on a final `401`
+    response, after the `tokenProvider` refresh retry (if any); manifest and
+    discovery requests included. `attempt` is the 1-based count of callback
+    invocations over the client's lifetime and `url` the request URL without
+    query or fragment. **Repeats are suppressed**: after a call, later and
+    concurrent `401`s skip the callback until a request succeeds (a `2xx`
+    response) and re-arms it. A redirect-to-login loop for a signed-in but
+    unauthorised user never sees a `2xx`, so it fires once; after a re-login
+    without a reload, a later expiry fires again with `attempt` 2, which a
+    host can use to spot repeated bounces. "One page load" = the module/client
+    lifetime in the browser; a reload or a new client starts over. It gets a
+    clone of the response. The call (suppressed or not) still rejects with
+    `Unauthorized`; if the callback throws, its error is the `Unauthorized`'s
+    `cause`, or, when the problem already has a `cause`, a non-enumerable
+    `onUnauthorizedError` property.
   - There is no `headers` option: add static headers such as `X-CSRF` with a
     middleware, as above.
   - **Logout and user switch.** The SDK does not notice that the session
