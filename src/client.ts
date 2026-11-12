@@ -12,7 +12,8 @@ import {
   UnknownResourceError,
   problemFromResponse,
 } from "./errors.ts";
-import { composeMiddleware } from "./interfaces.ts";
+import type { Cache } from "./cache/middleware.ts";
+import { CACHE_MIDDLEWARE, composeMiddleware } from "./interfaces.ts";
 import type { Middleware, Op, TokenProvider } from "./interfaces.ts";
 import { findResource, loadManifest } from "./manifest.ts";
 import type { JsonObject, Manifest, Resource } from "./manifest.ts";
@@ -605,18 +606,45 @@ export interface ClientOptions {
    */
   readonly credentials?: NonNullable<RequestInit["credentials"]> | undefined;
   /**
-   * Called (and awaited) on each final `401` response, after the
-   * `tokenProvider` refresh retry (if any) has failed to help; manifest and
-   * discovery requests included. A client call that makes several requests
-   * can fire it more than once, so make it idempotent (for example a
-   * navigation). It gets a clone of the response, so its body may be read.
+   * Called (and awaited) on the first final `401` response of this client,
+   * after the `tokenProvider` refresh retry (if any) has failed to help;
+   * manifest and discovery requests included. It gets a clone of the
+   * response, so its body may be read, and `{ attempt, url }`: `attempt` is
+   * the 1-based count of final `401`s this client has seen, `url` the request
+   * URL without query or fragment.
+   *
+   * Repeat calls are suppressed: after the first, later `401`s (and
+   * concurrent ones) do not call it again, for the lifetime of the client.
+   * "One page load" means the client (module) lifetime in the browser: a
+   * reload, or a new client, starts over. This stops a redirect-to-login loop
+   * when the user is signed in but not authorised. A suppressed `401` still
+   * rejects with `Unauthorized` (fail closed); only the callback is skipped.
    * The call still rejects with `Unauthorized` afterwards; if the callback
    * throws, its error is the `Unauthorized`'s `cause` (or, when the problem
    * already has a `cause`, a non-enumerable `onUnauthorizedError` property).
    * Typical use: navigate to the login page.
    */
   readonly onUnauthorized?:
-    ((response: Response) => void | Promise<void>) | undefined;
+    | ((
+        response: Response,
+        info: { readonly attempt: number; readonly url: string },
+      ) => void | Promise<void>)
+    | undefined;
+  /**
+   * The response cache (`createCache(...)` from `./cache`). The client wires
+   * `cache.middleware` and `cache.autoIfMatch` itself, innermost (after
+   * `middleware` and anything added by `use()`). Do not put them in
+   * `middleware` or `use()`: that throws {@link ClientError}.
+   *
+   * A cache needs a caller scope. A cookie client, one with `credentials`
+   * `"include"` or `"same-origin"` or with no `tokenProvider`, sends no
+   * per-user `Authorization` header, so without `cacheScope` every caller
+   * would share one entry set. Such a client with a cache and no `cacheScope`
+   * throws {@link ClientError} at construction. Set `cacheScope` to the
+   * caller's identity, or to `"shared"` when the data really is the same for
+   * everyone (an anonymous public API).
+   */
+  readonly cache?: Cache | undefined;
   /** Outermost first; see `composeMiddleware`. */
   readonly middleware?: readonly Middleware[] | undefined;
   /** Skips api-catalog discovery. */
@@ -647,6 +675,14 @@ export interface ClientOptions {
   readonly allowInsecureHttp?: boolean | undefined;
 }
 
+function refuseCacheMiddleware(middleware: Middleware): void {
+  if ((middleware as unknown as Record<symbol, unknown>)[CACHE_MIDDLEWARE]) {
+    throw new ClientError(
+      "cache.middleware and cache.autoIfMatch must not be added to middleware or use(); pass the cache as createClient({ cache })",
+    );
+  }
+}
+
 function shapeOf(body: unknown): string {
   if (body === undefined) {
     return "no body";
@@ -669,6 +705,8 @@ export class CrudClient {
   readonly #credentials: NonNullable<RequestInit["credentials"]> | undefined;
   readonly #onUnauthorized: ClientOptions["onUnauthorized"];
   readonly #middleware: Middleware[];
+  readonly #cacheMiddleware: readonly Middleware[];
+  #unauthorizedAttempts = 0;
   readonly #manifestUrl: string | undefined;
   readonly #allowedOrigins: readonly string[];
   readonly #allowInsecureHttp: boolean;
@@ -686,6 +724,24 @@ export class CrudClient {
     this.#credentials = options.credentials;
     this.#onUnauthorized = options.onUnauthorized;
     this.#middleware = [...(options.middleware ?? [])];
+    this.#middleware.forEach(refuseCacheMiddleware);
+    const cookieClient =
+      options.credentials === "include" ||
+      options.credentials === "same-origin" ||
+      options.tokenProvider === undefined;
+    if (
+      options.cache !== undefined &&
+      cookieClient &&
+      options.cacheScope === undefined
+    ) {
+      throw new ClientError(
+        "a client with a cache and no per-caller Authorization header (credentials 'include' or 'same-origin', or no tokenProvider) needs a cacheScope; pass cacheScope: <the caller's identity>, or cacheScope: \"shared\" if every caller may share cached data",
+      );
+    }
+    this.#cacheMiddleware =
+      options.cache === undefined
+        ? []
+        : [options.cache.middleware, options.cache.autoIfMatch];
     this.#manifestUrl = options.manifestUrl;
     this.#allowedOrigins = [...(options.allowedOrigins ?? [])];
     this.#allowInsecureHttp = options.allowInsecureHttp ?? false;
@@ -713,6 +769,7 @@ export class CrudClient {
 
   /** Adds middleware after the existing ones (innermost); it sees every later request. */
   use(middleware: Middleware): this {
+    refuseCacheMiddleware(middleware);
     this.#middleware.push(middleware);
     return this;
   }
@@ -823,7 +880,7 @@ export class CrudClient {
       }
     };
     return composeMiddleware(
-      this.#middleware,
+      [...this.#middleware, ...this.#cacheMiddleware],
       terminal,
     )({
       request,
@@ -852,8 +909,15 @@ export class CrudClient {
     let callbackError: unknown;
     let callbackFailed = false;
     if (response.status === 401 && this.#onUnauthorized !== undefined) {
+      this.#unauthorizedAttempts += 1;
+      const attempt = this.#unauthorizedAttempts;
       try {
-        await this.#onUnauthorized(response.clone());
+        if (attempt === 1) {
+          await this.#onUnauthorized(response.clone(), {
+            attempt,
+            url: describeUrl(call.url),
+          });
+        }
       } catch (error) {
         callbackFailed = true;
         callbackError = error;

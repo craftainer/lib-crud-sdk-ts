@@ -46,7 +46,7 @@ function setup(tokens: { current: string | null }) {
     manifestUrl: `${BASE}/m`,
     fetch,
     tokenProvider: () => tokens.current,
-    middleware: [cache.middleware, cache.autoIfMatch],
+    cache,
   });
   return { client, seen, cache };
 }

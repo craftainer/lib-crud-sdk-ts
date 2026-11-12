@@ -16,6 +16,7 @@
  * per-resource generation counter stops a response that was in flight when
  * an invalidation landed from being stored fresh.
  */
+import { CACHE_MIDDLEWARE } from "../interfaces.ts";
 import type {
   CacheEntry,
   MaybePromise,
@@ -860,6 +861,9 @@ export function createCache(options: CacheOptions): Cache {
     const entry = await safe(() => store.get(key));
     return entry?.etag;
   };
+
+  Object.defineProperty(middleware, CACHE_MIDDLEWARE, { value: true });
+  Object.defineProperty(autoIfMatch, CACHE_MIDDLEWARE, { value: true });
 
   return {
     middleware,
