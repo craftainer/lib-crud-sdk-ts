@@ -394,7 +394,8 @@ export function createCache(options: CacheOptions): Cache {
       key,
       generation: generationNow,
       scope,
-      forceRevalidate: control.has("no-cache"),
+      // `RequestOptions.cache: "no-cache"` arrives as `request.cache`; the header form still works.
+      forceRevalidate: control.has("no-cache") || request.cache === "no-cache",
     };
   };
 

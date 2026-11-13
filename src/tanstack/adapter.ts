@@ -4,7 +4,7 @@ import type { CrudClient, ResourceClient } from "../client.ts";
 import type { JsonObject, Manifest } from "../manifest.ts";
 import type { CrudQuery } from "./index.ts";
 
-type Init = { signal?: AbortSignal };
+type Init = { signal?: AbortSignal; cache?: "default" | "no-cache" };
 
 /** What `tanstackApi` returns: every slice the factories use, bound to one resource. */
 export interface TanstackApi<Read, Create, Update> {
