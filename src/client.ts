@@ -23,6 +23,17 @@ import type { Filters, QueryParams, Sort } from "./query.ts";
 /** Per-call options. */
 export interface RequestOptions {
   readonly signal?: AbortSignal | undefined;
+  /**
+   * The Fetch API's `RequestCache` naming, narrowed to the two modes the SDK
+   * honours. `"no-cache"` forces revalidation of a read: the request goes to
+   * the network (with the cached validator, so a `304` is still cheap) and
+   * the `./cache` middleware never answers it with a `hit` or `stale` entry,
+   * whatever the resource's `max_age`/`stale_while_revalidate`. Use it where
+   * a stale answer would be wrong, such as the read before an optimistic
+   * write. `"default"` (or absent) leaves the cache policy in charge. Reads
+   * only: writes ignore it.
+   */
+  readonly cache?: "default" | "no-cache" | undefined;
 }
 
 /**
@@ -86,6 +97,21 @@ export interface Call {
   readonly apiVersion: string | null;
   readonly json?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
+  /** `"no-cache"` sets `RequestInit.cache` on the request, which the cache middleware reads. */
+  readonly cache?: "no-cache";
+}
+
+/** `call` with the caller's `cache` mode applied (reads only); rejects an unknown mode. */
+function withCache(call: Call, { cache }: RequestOptions): Call {
+  if (cache === undefined || cache === "default") {
+    return call;
+  }
+  if ((cache as string) !== "no-cache") {
+    throw new ClientError(
+      `unsupported cache mode ${JSON.stringify(cache)}; use "default" or "no-cache"`,
+    );
+  }
+  return call.method === "GET" ? { ...call, cache } : call;
 }
 
 /** What a {@link ResourceClient} needs from its client. */
@@ -436,7 +462,10 @@ export class ResourceClient<
   }
 
   async #one<T>(call: Call, options: RequestOptions): Promise<T> {
-    const body = await this.#transport.json(call, options.signal);
+    const body = await this.#transport.json(
+      withCache(call, options),
+      options.signal,
+    );
     if (typeof body !== "object" || body === null || Array.isArray(body)) {
       throw new ResponseError(
         `${call.method} ${describeUrl(call.url)}: expected a JSON object, got ${shapeOf(body)}`,
@@ -446,7 +475,10 @@ export class ResourceClient<
   }
 
   async #many<T>(call: Call, options: RequestOptions): Promise<T[]> {
-    const body = await this.#transport.json(call, options.signal);
+    const body = await this.#transport.json(
+      withCache(call, options),
+      options.signal,
+    );
     if (!Array.isArray(body)) {
       throw new ResponseError(
         `${call.method} ${describeUrl(call.url)}: expected a JSON array, got ${shapeOf(body)}`,
@@ -844,6 +876,7 @@ export class CrudClient {
       method: call.method,
       headers,
       signal: signal ?? null,
+      ...(call.cache === undefined ? {} : { cache: call.cache }),
       ...(this.#credentials === undefined
         ? {}
         : { credentials: this.#credentials }),

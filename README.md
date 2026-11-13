@@ -81,7 +81,8 @@ await heroes.update(1, { name: "Ada" }, { ifMatch: etag }); // 412 -> Preconditi
   else `CapabilityError`): `list`, `iterAll`, `get`, `create`, `update`,
   `updateMany`, `delete`, `deleteMany`, `restore({ id } | { filters })`,
   `clone`, `createDraft`, `publish`, `filters`, `stats`, `predict`,
-  `revisions`, `eventsUrl()`. Every call takes `{ signal }`. A call that is
+  `revisions`, `eventsUrl()`. Every call takes `{ signal }`; reads also take
+  `{ cache }` (see "Forcing a revalidation" below). A call that is
   invalid for the manifest (unknown field or operator, wrong value type, bad
   sort or paging) rejects with `InvalidQueryError` before any request.
 - **Query strings** are byte for byte those of the Python SDK (a shared
@@ -258,6 +259,25 @@ objects, snake_case members).
   Every connection clears the resource once per cache, including for a
   subscription that joins an already connected stream, which clears before
   its gate opens.
+- **Forcing a revalidation.** Every read call (`get`, `list`, `iterAll`,
+  `stats`, `predict`, `filters`, `revisions`) takes `cache?: "default" | "no-cache"`,
+  named after the Fetch API's `RequestCache`. `"no-cache"` sends the request
+  to the network with the cached validator (`If-None-Match`, so an unchanged
+  record is still a cheap `304`) and the cache middleware never answers it
+  with a `hit` or `stale` entry, even with `max_age` or
+  `stale_while_revalidate` above zero and the stream connected. It is set as
+  `Request.cache`, so no header is added (no CORS preflight). Use it where a
+  cached answer would be wrong, for example the read before an optimistic
+  `If-Match` write (a `hit` there could pair an old body with a stale ETag
+  and lose an update) and the reload after a `412`. `"default"` or no option
+  leaves the policy in charge; writes ignore it; any other value rejects with
+  `ClientError`. A request `Cache-Control: no-cache` header is honoured the
+  same way. The TanStack factories take it in their `init`
+  (`recordOptions(ns, "heroes", api, id, { cache: "no-cache" })`, likewise
+  `listOptions`, `infiniteListOptions`, `statsOptions`, `predictOptions`,
+  `revisionsOptions`) for an imperative `queryClient.fetchQuery(...)`; it is
+  not part of the query key, so put it on the one-off call rather than on a
+  shared `useQuery`.
 - A write clears what it touches when it succeeds. A write whose outcome is
   unknown (the request threw, or the answer was `5xx`) clears the same, since
   the server may have applied it; a refused write (any other status below `500`) clears

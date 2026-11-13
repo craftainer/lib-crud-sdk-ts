@@ -191,6 +191,19 @@ export interface QueryContext {
 export interface QueryOptionsInit {
   /** TanStack's `staleTime` in milliseconds. Default 0 (the SDK cache revalidates for free). */
   readonly staleTime?: number;
+  /**
+   * `"no-cache"` makes the query function force revalidation in the SDK cache
+   * (see `RequestOptions.cache`). Meant for an imperative `fetchQuery`/
+   * `refetch` that must not see a cached answer; it is not part of the query
+   * key. Default: the cache policy decides.
+   */
+  readonly cache?: "default" | "no-cache";
+}
+
+type FetchInit = { signal: AbortSignal; cache?: "default" | "no-cache" };
+
+function fetchInit(signal: AbortSignal, init: QueryOptionsInit): FetchInit {
+  return init.cache === undefined ? { signal } : { signal, cache: init.cache };
 }
 
 /** Plain query options with a typed key; spread into `useQuery`/`fetchQuery`. */
@@ -223,29 +236,38 @@ export interface CrudInfiniteQueryOptions<T> {
 export interface ListApi<T> {
   list(
     query: CrudQuery | undefined,
-    init?: { signal?: AbortSignal },
+    init?: { signal?: AbortSignal; cache?: "default" | "no-cache" },
   ): Promise<T[]>;
 }
 export interface RecordApi<T> {
-  get(id: number, init?: { signal?: AbortSignal }): Promise<T>;
+  get(
+    id: number,
+    init?: { signal?: AbortSignal; cache?: "default" | "no-cache" },
+  ): Promise<T>;
 }
 export interface StatsApi<S> {
   stats(
     query: CrudQuery | undefined,
-    init?: { signal?: AbortSignal },
+    init?: { signal?: AbortSignal; cache?: "default" | "no-cache" },
   ): Promise<S>;
 }
 export interface PredictApi<P> {
   predict(
     query: CrudQuery | undefined,
-    init?: { signal?: AbortSignal },
+    init?: { signal?: AbortSignal; cache?: "default" | "no-cache" },
   ): Promise<P>;
 }
 export interface RevisionsApi<R> {
-  revisions(id: number, init?: { signal?: AbortSignal }): Promise<R[]>;
+  revisions(
+    id: number,
+    init?: { signal?: AbortSignal; cache?: "default" | "no-cache" },
+  ): Promise<R[]>;
 }
 export interface ManifestApi<M> {
-  manifest(init?: { signal?: AbortSignal }): Promise<M>;
+  manifest(init?: {
+    signal?: AbortSignal;
+    cache?: "default" | "no-cache";
+  }): Promise<M>;
 }
 export interface CreateApi<T, C> {
   create(body: C): Promise<T>;
@@ -270,7 +292,7 @@ export function listOptions<T>(
 ): CrudQueryOptions<T[]> {
   return {
     queryKey: tag(crudKeys.list(ns, resource, query)),
-    queryFn: ({ signal }) => api.list(query, { signal }),
+    queryFn: ({ signal }) => api.list(query, fetchInit(signal, init)),
     staleTime: init.staleTime ?? 0,
   };
 }
@@ -284,7 +306,7 @@ export function recordOptions<T>(
 ): CrudQueryOptions<T> {
   return {
     queryKey: tag(crudKeys.record(ns, resource, id)),
-    queryFn: ({ signal }) => api.get(id, { signal }),
+    queryFn: ({ signal }) => api.get(id, fetchInit(signal, init)),
     staleTime: init.staleTime ?? 0,
   };
 }
@@ -298,7 +320,7 @@ export function statsOptions<S>(
 ): CrudQueryOptions<S> {
   return {
     queryKey: tag(crudKeys.stats(ns, resource, query)),
-    queryFn: ({ signal }) => api.stats(query, { signal }),
+    queryFn: ({ signal }) => api.stats(query, fetchInit(signal, init)),
     staleTime: init.staleTime ?? 0,
   };
 }
@@ -312,7 +334,7 @@ export function predictOptions<P>(
 ): CrudQueryOptions<P> {
   return {
     queryKey: tag(crudKeys.predict(ns, resource, query)),
-    queryFn: ({ signal }) => api.predict(query, { signal }),
+    queryFn: ({ signal }) => api.predict(query, fetchInit(signal, init)),
     staleTime: init.staleTime ?? 0,
   };
 }
@@ -326,7 +348,7 @@ export function revisionsOptions<R>(
 ): CrudQueryOptions<R[]> {
   return {
     queryKey: tag(crudKeys.revisions(ns, resource, id)),
-    queryFn: ({ signal }) => api.revisions(id, { signal }),
+    queryFn: ({ signal }) => api.revisions(id, fetchInit(signal, init)),
     staleTime: init.staleTime ?? 0,
   };
 }
@@ -374,7 +396,7 @@ export function infiniteListOptions<T>(
     queryFn: ({ signal, pageParam }) =>
       api.list(
         { ...query, [skipKey]: pageParam, [limitKey]: limit },
-        { signal },
+        fetchInit(signal, init),
       ),
     initialPageParam: 0,
     getNextPageParam: (lastPage, _all, lastPageParam) =>
